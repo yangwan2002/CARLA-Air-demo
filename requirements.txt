@@ -1,0 +1,21 @@
+# Runtime dependencies for the air_ground_relay_collect data pipeline.
+#
+# `carla` and `airsim` are NOT installed via pip in most CARLA-Air builds -
+# they are shipped as a python egg (carla) and a pip package (airsim) inside
+# the CARLA-Air distribution. Make sure the appropriate egg / wheel for your
+# CARLA-Air version is on PYTHONPATH before running.
+#
+# These two are listed here only so `pip install -r requirements.txt` works
+# on machines where the official wheels are reachable.
+
+numpy>=1.22
+opencv-python>=4.5
+PyYAML>=6.0
+
+# Pin to the AirSim PythonClient that ships with CARLA-Air; the public
+# `airsim` wheel on PyPI is usually compatible but may lag the simulator.
+airsim>=1.8.1 ; platform_system != "Darwin"
+
+# CARLA's PythonAPI is normally distributed as an .egg shipped with the
+# simulator. If your CARLA-Air distribution provides a wheel, uncomment:
+# carla==0.9.15

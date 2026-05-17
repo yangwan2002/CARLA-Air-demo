@@ -1,0 +1,155 @@
+# =============================================================================
+# CARLA-Air air-ground-relay collaborative data collection - default config
+# =============================================================================
+# All distances are in meters, angles in degrees (unless explicitly noted as
+# quaternion or radians). CARLA uses a left-handed UE4-style coordinate system
+# (x forward, y right, z up). AirSim uses NED (x north, y east, z down).
+# We keep the two coordinate spaces separate and only convert at the boundary
+# (see src/geometry.py:carla_to_airsim_ned).
+# =============================================================================
+
+simulation:
+  map: Town10HD
+  carla_host: localhost
+  carla_port: 2000
+  airsim_host: localhost
+  airsim_port: 41451
+  synchronous_mode: true
+  fixed_delta_seconds: 0.05      # 20 Hz physics tick
+  simulation_hz: 20              # informational - should match 1/fixed_delta_seconds
+  save_hz: 10                    # frames per second actually saved to disk
+  duration_seconds: 90
+  output_dir: ./AirGroundRelay-Sim
+  sequence_name: seq_001         # subfolder name under output_dir/sequences/
+  seed: 2024                     # used for traffic manager + numpy
+  weather:                       # optional weather override; null = leave map default
+    cloudiness: 10.0
+    precipitation: 0.0
+    sun_altitude_angle: 70.0
+
+# -----------------------------------------------------------------------------
+# Ground vehicle (UGV)
+# -----------------------------------------------------------------------------
+ugv:
+  blueprint: vehicle.tesla.model3
+  role_name: ugv_collector
+  spawn_point_index: 0           # index into world.get_map().get_spawn_points()
+  control_mode: autopilot        # "autopilot" or "waypoint"
+  speed_mps: 6.0                 # used by waypoint follower, also TM target speed
+  autopilot:
+    ignore_lights_percentage: 0.0
+    ignore_signs_percentage: 0.0
+    vehicle_percentage_speed_difference: 0.0   # 0 = same as speed limit
+  waypoints:                    # only used when control_mode == "waypoint"
+    # list of [x, y, z] in CARLA world coordinates (meters)
+    # leave empty to fall back to autopilot
+    []
+
+  sensor_mode: rgbd              # "rgbd" or "stereo"
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [1.5, 0.0, 1.6]    # x, y, z relative to vehicle (forward, right, up)
+    rotation: [0.0, 0.0, 0.0]    # roll, pitch, yaw (degrees)
+    stereo_baseline_m: 0.2       # only used when sensor_mode == "stereo"
+    stereo_capture_depth: false  # if true, also attach a depth camera at the left cam
+
+# -----------------------------------------------------------------------------
+# Aerial vehicle (UAV) - controlled via AirSim
+# -----------------------------------------------------------------------------
+uav:
+  vehicle_name: ""               # default AirSim vehicle (empty string)
+  mode: follow_ugv               # "follow_ugv" | "hover" | "waypoint"
+  takeoff_timeout_s: 8.0
+  altitude_m: 30.0               # used by hover + follow_ugv (height above ground)
+  speed_mps: 6.0
+  follow_offset:
+    behind_m: 8.0                # how far behind the UGV (in UGV body frame)
+    right_m: 0.0
+    altitude_m: 30.0             # height above UGV
+    update_every_n_saves: 1      # re-issue moveToPosition every N saved frames
+  waypoints_ned:                 # [n, e, d] meters, d is NEGATIVE for "up"
+    - [0.0,   0.0,  -30.0]
+    - [40.0,  0.0,  -30.0]
+    - [40.0, 40.0,  -30.0]
+    - [0.0,  40.0,  -30.0]
+    - [0.0,   0.0,  -30.0]
+
+  cameras:
+    front_rgb: true
+    front_depth: true
+    down_rgb: true
+    down_depth: true
+  # AirSim camera names (must exist in settings.json). Defaults are:
+  #   "front_center" and "bottom_center" - override if your settings differ.
+  airsim_camera_names:
+    front: front_center
+    down: bottom_center
+
+# -----------------------------------------------------------------------------
+# Fixed relay (surveillance) cameras in the CARLA world
+# -----------------------------------------------------------------------------
+relay_cameras:
+  default_resolution: [1280, 720]
+  default_fov: 90.0
+  default_use_depth: true
+  cameras:
+    - name: relay_01
+      location: [-40.0,  10.0, 8.0]
+      look_at:  [  0.0,   0.0, 1.0]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_02
+      location: [ 30.0, -25.0, 9.0]
+      look_at:  [  0.0,   0.0, 1.0]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_03
+      location: [ 60.0,  40.0, 12.0]
+      look_at:  [ 20.0,  20.0, 1.0]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: false
+    - name: relay_04
+      location: [-30.0, -60.0, 10.0]
+      look_at:  [-10.0, -20.0, 1.0]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_05
+      location: [ 10.0,  60.0, 7.0]
+      look_at:  [ 10.0,  20.0, 1.0]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: false
+
+# -----------------------------------------------------------------------------
+# Data persistence
+# -----------------------------------------------------------------------------
+save:
+  image_format: png
+  save_depth_npy: true
+  save_depth_png: true            # uint16 visualization PNG (meters * 256, clipped)
+  depth_png_max_m: 80.0           # everything > this gets clipped in the viz PNG
+  save_frames_jsonl: true
+  save_pose_csv: true
+  save_calibration: true
+  save_trajectory_yaml: true
+  jsonl_filename: frames.jsonl
+
+# -----------------------------------------------------------------------------
+# Coordinate-transform options (CARLA <-> AirSim)
+#
+# CARLA-Air does not by default share a world frame between CARLA and AirSim.
+# This block configures a *configurable* approximate mapping that you can
+# refine for your particular CARLA-Air build. See src/geometry.py.
+# -----------------------------------------------------------------------------
+coords:
+  carla_to_airsim_ned:
+    # AirSim NED is rooted at the AirSim PlayerStart. Override these if you
+    # have measured the offset between the CARLA world origin and the AirSim
+    # origin in your particular CARLA-Air build.
+    origin_offset_carla: [0.0, 0.0, 0.0]   # CARLA (x, y, z) of AirSim NED origin
+    yaw_offset_deg: 0.0                    # rotation about z applied before NED swap
