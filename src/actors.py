@@ -106,33 +106,55 @@ def spawn_ugv(
     if not spawn_points:
         raise RuntimeError("CARLA map returned no spawn points!")
 
-    idx = int(ugv_cfg.get("spawn_point_index", 0))
-    if idx < 0 or idx >= len(spawn_points):
-        LOGGER.warning(
-            "spawn_point_index=%d out of range (0..%d); using 0 instead.",
-            idx, len(spawn_points) - 1,
+    spawn_xy = ugv_cfg.get("spawn_xy", None)
+    if spawn_xy is not None and len(spawn_xy) >= 2:
+        sx, sy = float(spawn_xy[0]), float(spawn_xy[1])
+        sz = 0.6  # small z offset above ground to avoid collision
+        yaw = float(ugv_cfg.get("spawn_yaw_deg", 0.0))
+        spawn_tf = carla.Transform(
+            carla.Location(x=sx, y=sy, z=sz),
+            carla.Rotation(roll=0.0, pitch=0.0, yaw=yaw),
         )
-        idx = 0
-    spawn_tf = spawn_points[idx]
+        LOGGER.info(
+            "Spawning UGV %s at explicit spawn_xy=(%.2f, %.2f, %.2f), yaw=%.1f.",
+            bp.id, sx, sy, sz, yaw,
+        )
+        vehicle = world.try_spawn_actor(bp, spawn_tf)
+        if vehicle is None:
+            LOGGER.warning(
+                "Explicit spawn_xy failed; falling back to spawn_point_index.",
+            )
+    else:
+        vehicle = None
 
-    LOGGER.info(
-        "Spawning UGV %s at spawn point %d (xyz=(%.2f, %.2f, %.2f)).",
-        bp.id, idx, spawn_tf.location.x, spawn_tf.location.y, spawn_tf.location.z,
-    )
-
-    vehicle = world.try_spawn_actor(bp, spawn_tf)
     if vehicle is None:
-        # Try a few neighbouring spawn points if the chosen one is blocked.
-        LOGGER.warning("Spawn at index %d failed (occupied); trying neighbours.", idx)
-        for offset in range(1, 6):
-            for sign in (1, -1):
-                j = (idx + sign * offset) % len(spawn_points)
-                vehicle = world.try_spawn_actor(bp, spawn_points[j])
+        idx = int(ugv_cfg.get("spawn_point_index", 0))
+        if idx < 0 or idx >= len(spawn_points):
+            LOGGER.warning(
+                "spawn_point_index=%d out of range (0..%d); using 0 instead.",
+                idx, len(spawn_points) - 1,
+            )
+            idx = 0
+        spawn_tf = spawn_points[idx]
+
+        LOGGER.info(
+            "Spawning UGV %s at spawn point %d (xyz=(%.2f, %.2f, %.2f)).",
+            bp.id, idx, spawn_tf.location.x, spawn_tf.location.y, spawn_tf.location.z,
+        )
+
+        vehicle = world.try_spawn_actor(bp, spawn_tf)
+        if vehicle is None:
+            # Try a few neighbouring spawn points if the chosen one is blocked.
+            LOGGER.warning("Spawn at index %d failed (occupied); trying neighbours.", idx)
+            for offset in range(1, 6):
+                for sign in (1, -1):
+                    j = (idx + sign * offset) % len(spawn_points)
+                    vehicle = world.try_spawn_actor(bp, spawn_points[j])
+                    if vehicle is not None:
+                        LOGGER.info("Spawned UGV at fallback spawn point %d.", j)
+                        break
                 if vehicle is not None:
-                    LOGGER.info("Spawned UGV at fallback spawn point %d.", j)
                     break
-            if vehicle is not None:
-                break
     if vehicle is None:
         raise RuntimeError("Failed to spawn UGV after exhausting fallbacks.")
 

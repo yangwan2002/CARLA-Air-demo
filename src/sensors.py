@@ -97,9 +97,23 @@ def _make_camera_blueprint(
     bp.set_attribute("image_size_x", str(int(width)))
     bp.set_attribute("image_size_y", str(int(height)))
     bp.set_attribute("fov", str(float(fov)))
-    # Match the chosen save_hz approximately; CARLA will tick at fixed_delta
-    # anyway when the world is synchronous, so this is mostly cosmetic.
     bp.set_attribute("sensor_tick", "0.0")
+
+    if sensor_type == "rgb":
+        # MegaDepth-style training data has no motion blur / bloom / lens
+        # flare. Disable them so the evaluation distribution matches.
+        for k, v in (
+            ("motion_blur_intensity", "0.0"),
+            ("motion_blur_max_distortion", "0.0"),
+            ("motion_blur_min_object_screen_size", "0.0"),
+            ("lens_flare_intensity", "0.0"),
+            ("bloom_intensity", "0.0"),
+            ("chromatic_aberration_intensity", "0.0"),
+        ):
+            try:
+                bp.set_attribute(k, v)
+            except Exception:
+                pass
     return bp
 
 
@@ -307,6 +321,31 @@ def pull_image_for_frame(
         sensor.name, max_skips, target_frame,
     )
     return None
+
+
+def pull_latest_image(
+    sensor: CarlaSensor,
+    timeout_s: float = 2.0,
+) -> Optional["carla.Image"]:
+    """Block for the next image on the sensor queue, then drain any stale ones.
+
+    Returns the freshest available image, or None on timeout. Use this in async
+    mode where sensor frames are not aligned with a specific world tick.
+    """
+    try:
+        latest = sensor.queue.get(timeout=timeout_s)
+    except queue.Empty:
+        LOGGER.warning(
+            "Sensor %s: timed out waiting for any frame (timeout=%.2fs)",
+            sensor.name, timeout_s,
+        )
+        return None
+    while True:
+        try:
+            latest = sensor.queue.get_nowait()
+        except queue.Empty:
+            break
+    return latest
 
 
 # ---------------------------------------------------------------------------

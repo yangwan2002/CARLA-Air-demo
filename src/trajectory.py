@@ -172,6 +172,11 @@ class UavController:
         """Launch + initial maneuver depending on mode."""
         self.client.takeoff()
         self.client.go_to_initial_altitude()
+        # Apply per-camera pitch (e.g. -90 for nadir) once the UAV is airborne.
+        try:
+            self.client.apply_camera_pitch()
+        except Exception as e:  # pragma: no cover
+            LOGGER.warning("apply_camera_pitch failed: %s", e)
 
         if self.mode == "hover":
             self.client.hover()
@@ -184,11 +189,54 @@ class UavController:
             else:
                 LOGGER.info("UAV mode=waypoint: dispatching %d waypoints.", len(wps))
                 self.client.move_on_path(wps)
+        elif self.mode == "patrol_multi_alt":
+            wps = self._build_multi_alt_loop()
+            LOGGER.info("UAV mode=patrol_multi_alt: %d waypoints across %d altitudes.",
+                        len(wps), len(self.uav_cfg.get("patrol", {}).get("altitudes_m", [])))
+            self.client.move_on_path(wps)
         elif self.mode == "follow_ugv":
             LOGGER.info("UAV mode=follow_ugv: will track UGV position each save tick.")
         else:
             LOGGER.warning("Unknown UAV mode %r; defaulting to hover.", self.mode)
             self.client.hover()
+
+    def _build_multi_alt_loop(self) -> List[List[float]]:
+        """Build a stack of square loops at different altitudes in AirSim NED.
+
+        Reads ``uav.patrol`` block:
+            altitudes_m: [15, 30, 60]   # positive meters above ground
+            half_size_m: 60              # half-side length of the square loop
+            center_ned:  [n, e]          # optional center in NED, defaults [0, 0]
+            yaw_offset_deg: 0            # optional rotation about z
+
+        Returns a list of [n, e, d] waypoints.
+        """
+        patrol_cfg = self.uav_cfg.get("patrol", {}) or {}
+        alts = list(patrol_cfg.get("altitudes_m", [30.0]))
+        half = float(patrol_cfg.get("half_size_m", 60.0))
+        center = patrol_cfg.get("center_ned", [0.0, 0.0]) or [0.0, 0.0]
+        cn, ce = float(center[0]), float(center[1])
+        yaw = math.radians(float(patrol_cfg.get("yaw_offset_deg", 0.0)))
+
+        # local-frame square corners (north, east); we'll rotate by yaw_offset
+        corners_local = [
+            (+half, -half),
+            (+half, +half),
+            (-half, +half),
+            (-half, -half),
+            (+half, -half),
+        ]
+        cs, sn = math.cos(yaw), math.sin(yaw)
+
+        waypoints: List[List[float]] = []
+        for i, alt in enumerate(alts):
+            d = -abs(float(alt))
+            ring = corners_local if (i % 2 == 0) else list(reversed(corners_local))
+            for nx, ey in ring:
+                rn = cs * nx - sn * ey + cn
+                re = sn * nx + cs * ey + ce
+                waypoints.append([rn, re, d])
+        return waypoints
 
     def on_saved_frame(self, ugv_vehicle: Optional["carla.Vehicle"]) -> None:
         """Hook called once per *saved* frame from the main loop."""

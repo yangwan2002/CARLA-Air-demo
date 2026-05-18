@@ -1,11 +1,19 @@
 # =============================================================================
-# CARLA-Air air-ground-relay collaborative data collection - default config
+# CARLA-Air air-ground-relay - paper-evaluation config
 # =============================================================================
-# All distances are in meters, angles in degrees (unless explicitly noted as
-# quaternion or radians). CARLA uses a left-handed UE4-style coordinate system
-# (x forward, y right, z up). AirSim uses NED (x north, y east, z down).
-# We keep the two coordinate spaces separate and only convert at the boundary
-# (see src/geometry.py:carla_to_airsim_ned).
+# Geometry
+#   * UGV drives a fixed ~80m square waypoint loop centred near the world
+#     origin in Town10HD.
+#   * UAV flies a stacked square loop at 3 altitudes (15 / 30 / 60 m) above
+#     the same centre, so UAV-UGV pairs span a wide range of overlap ratios
+#     and scale ratios. The UAV camera is nadir (pitch -90 deg) so MegaDepth-
+#     trained matchers see a familiar bird's-eye view.
+#   * 5 relay cameras sit at the corners + middle of the loop, mounted at
+#     ~7-9 m height and angled forward-downward (~25-35 deg pitch), the way
+#     real surveillance cameras are. Their look_at points were chosen so the
+#     UGV passes through each FOV at least once per loop.
+#
+# CARLA uses x-forward / y-right / z-up (left-handed). AirSim is NED.
 # =============================================================================
 
 simulation:
@@ -14,15 +22,15 @@ simulation:
   carla_port: 2000
   airsim_host: localhost
   airsim_port: 41451
-  synchronous_mode: true
-  fixed_delta_seconds: 0.05      # 20 Hz physics tick
-  simulation_hz: 20              # informational - should match 1/fixed_delta_seconds
-  save_hz: 10                    # frames per second actually saved to disk
-  duration_seconds: 90
+  synchronous_mode: false        # async needed because CARLA<->AirSim sync deadlocks
+  fixed_delta_seconds: 0.05
+  simulation_hz: 20
+  save_hz: 10
+  duration_seconds: 60           # ~600 saved frames
   output_dir: ./AirGroundRelay-Sim
-  sequence_name: seq_001         # subfolder name under output_dir/sequences/
-  seed: 2024                     # used for traffic manager + numpy
-  weather:                       # optional weather override; null = leave map default
+  sequence_name: paper_eval_001
+  seed: 2024
+  weather:
     cloudiness: 10.0
     precipitation: 0.0
     sun_altitude_angle: 70.0
@@ -33,97 +41,106 @@ simulation:
 ugv:
   blueprint: vehicle.tesla.model3
   role_name: ugv_collector
-  spawn_point_index: 0           # index into world.get_map().get_spawn_points()
-  control_mode: autopilot        # "autopilot" or "waypoint"
-  speed_mps: 6.0                 # used by waypoint follower, also TM target speed
+  spawn_point_index: 0
+  spawn_xy: [40.0, -40.0]        # CARLA (x, y); set null to use spawn_point_index
+  spawn_yaw_deg: 90.0            # initial heading (toward +y)
+  control_mode: waypoint         # "autopilot" or "waypoint"
+  speed_mps: 5.0
   autopilot:
-    ignore_lights_percentage: 0.0
-    ignore_signs_percentage: 0.0
-    vehicle_percentage_speed_difference: 0.0   # 0 = same as speed limit
-  waypoints:                    # only used when control_mode == "waypoint"
-    # list of [x, y, z] in CARLA world coordinates (meters)
-    # leave empty to fall back to autopilot
-    []
+    ignore_lights_percentage: 100.0
+    ignore_signs_percentage: 100.0
+    vehicle_percentage_speed_difference: 0.0
+  waypoints:
+    - [ 40.0,  40.0, 0.0]
+    - [-40.0,  40.0, 0.0]
+    - [-40.0, -40.0, 0.0]
+    - [ 40.0, -40.0, 0.0]
+    - [ 40.0,  40.0, 0.0]   # close the loop
 
-  sensor_mode: rgbd              # "rgbd" or "stereo"
+  sensor_mode: rgbd
   camera:
     resolution: [1280, 720]
     fov: 90.0
-    location: [1.5, 0.0, 1.6]    # x, y, z relative to vehicle (forward, right, up)
-    rotation: [0.0, 0.0, 0.0]    # roll, pitch, yaw (degrees)
-    stereo_baseline_m: 0.2       # only used when sensor_mode == "stereo"
-    stereo_capture_depth: false  # if true, also attach a depth camera at the left cam
+    location: [1.5, 0.0, 1.6]
+    rotation: [0.0, 0.0, 0.0]
+    stereo_baseline_m: 0.2
+    stereo_capture_depth: false
 
 # -----------------------------------------------------------------------------
-# Aerial vehicle (UAV) - controlled via AirSim
+# Aerial vehicle (UAV)
 # -----------------------------------------------------------------------------
 uav:
-  vehicle_name: ""               # default AirSim vehicle (empty string)
-  mode: follow_ugv               # "follow_ugv" | "hover" | "waypoint"
+  vehicle_name: ""
+  mode: patrol_multi_alt         # "follow_ugv" | "hover" | "waypoint" | "patrol_multi_alt"
   takeoff_timeout_s: 8.0
-  altitude_m: 30.0               # used by hover + follow_ugv (height above ground)
-  speed_mps: 6.0
-  follow_offset:
-    behind_m: 8.0                # how far behind the UGV (in UGV body frame)
+  altitude_m: 15.0
+  speed_mps: 5.0
+
+  patrol:
+    altitudes_m: [15.0, 30.0, 60.0]
+    half_size_m: 40.0
+    center_ned: [0.0, 0.0]
+    yaw_offset_deg: 0.0
+
+  camera_pitch_deg:
+    front: -90.0                 # nadir for paper evaluation
+    down:  -90.0
+
+  follow_offset:                 # only used when mode == follow_ugv
+    behind_m: 8.0
     right_m: 0.0
-    altitude_m: 30.0             # height above UGV
-    update_every_n_saves: 1      # re-issue moveToPosition every N saved frames
-  waypoints_ned:                 # [n, e, d] meters, d is NEGATIVE for "up"
-    - [0.0,   0.0,  -30.0]
-    - [40.0,  0.0,  -30.0]
-    - [40.0, 40.0,  -30.0]
-    - [0.0,  40.0,  -30.0]
-    - [0.0,   0.0,  -30.0]
+    altitude_m: 30.0
+    update_every_n_saves: 1
+
+  waypoints_ned: []
 
   cameras:
     front_rgb: true
     front_depth: true
-    down_rgb: true
-    down_depth: true
-  # AirSim camera names (must exist in settings.json). Defaults are:
-  #   "front_center" and "bottom_center" - override if your settings differ.
+    down_rgb: false              # front camera is now nadir, so "down" is redundant
+    down_depth: false
   airsim_camera_names:
-    front: front_center
-    down: bottom_center
+    front: "0"
+    down:  "0"
 
 # -----------------------------------------------------------------------------
-# Fixed relay (surveillance) cameras in the CARLA world
+# Fixed relay (surveillance) cameras
 # -----------------------------------------------------------------------------
 relay_cameras:
   default_resolution: [1280, 720]
-  default_fov: 90.0
+  default_fov: 75.0
   default_use_depth: true
   cameras:
-    - name: relay_01
-      location: [-40.0,  10.0, 8.0]
-      look_at:  [  0.0,   0.0, 1.0]
+    - name: relay_01             # NW corner pole, looks SE into the loop
+      location: [-50.0,  50.0, 8.0]
+      look_at:  [-10.0,  10.0, 1.5]
       resolution: [1280, 720]
-      fov: 90.0
+      fov: 75.0
       use_depth: true
-    - name: relay_02
-      location: [ 30.0, -25.0, 9.0]
-      look_at:  [  0.0,   0.0, 1.0]
+    - name: relay_02             # NE corner pole, looks SW into the loop
+      location: [ 50.0,  50.0, 8.0]
+      look_at:  [ 10.0,  10.0, 1.5]
       resolution: [1280, 720]
-      fov: 90.0
+      fov: 75.0
       use_depth: true
-    - name: relay_03
-      location: [ 60.0,  40.0, 12.0]
-      look_at:  [ 20.0,  20.0, 1.0]
+    - name: relay_03             # SE corner pole, looks NW into the loop
+      location: [ 50.0, -50.0, 8.0]
+      look_at:  [ 10.0, -10.0, 1.5]
       resolution: [1280, 720]
-      fov: 90.0
-      use_depth: false
-    - name: relay_04
-      location: [-30.0, -60.0, 10.0]
-      look_at:  [-10.0, -20.0, 1.0]
-      resolution: [1280, 720]
-      fov: 90.0
+      fov: 75.0
       use_depth: true
-    - name: relay_05
-      location: [ 10.0,  60.0, 7.0]
-      look_at:  [ 10.0,  20.0, 1.0]
+    - name: relay_04             # SW corner pole, looks NE into the loop
+      location: [-50.0, -50.0, 8.0]
+      look_at:  [-10.0, -10.0, 1.5]
       resolution: [1280, 720]
-      fov: 90.0
-      use_depth: false
+      fov: 75.0
+      use_depth: true
+    - name: relay_05             # mid-east pole, looks W across the loop
+      location: [ 55.0,   0.0, 9.0]
+      look_at:  [  0.0,   0.0, 1.5]
+      resolution: [1280, 720]
+      fov: 75.0
+      use_depth: true
 
 # -----------------------------------------------------------------------------
 # Data persistence
@@ -131,8 +148,8 @@ relay_cameras:
 save:
   image_format: png
   save_depth_npy: true
-  save_depth_png: true            # uint16 visualization PNG (meters * 256, clipped)
-  depth_png_max_m: 80.0           # everything > this gets clipped in the viz PNG
+  save_depth_png: true
+  depth_png_max_m: 80.0
   save_frames_jsonl: true
   save_pose_csv: true
   save_calibration: true
@@ -140,16 +157,9 @@ save:
   jsonl_filename: frames.jsonl
 
 # -----------------------------------------------------------------------------
-# Coordinate-transform options (CARLA <-> AirSim)
-#
-# CARLA-Air does not by default share a world frame between CARLA and AirSim.
-# This block configures a *configurable* approximate mapping that you can
-# refine for your particular CARLA-Air build. See src/geometry.py.
+# Coordinate-transform options
 # -----------------------------------------------------------------------------
 coords:
   carla_to_airsim_ned:
-    # AirSim NED is rooted at the AirSim PlayerStart. Override these if you
-    # have measured the offset between the CARLA world origin and the AirSim
-    # origin in your particular CARLA-Air build.
-    origin_offset_carla: [0.0, 0.0, 0.0]   # CARLA (x, y, z) of AirSim NED origin
-    yaw_offset_deg: 0.0                    # rotation about z applied before NED swap
+    origin_offset_carla: [0.0, 0.0, 0.0]
+    yaw_offset_deg: 0.0

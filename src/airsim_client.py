@@ -207,6 +207,43 @@ class AirsimClient:
     # ------------------------------------------------------------------
     # state queries
     # ------------------------------------------------------------------
+    def apply_camera_pitch(self) -> None:
+        """Apply per-camera pitch from config via simSetCameraPose.
+
+        ``uav.camera_pitch_deg`` may be a single number (applied to every
+        configured camera) or a dict keyed by logical camera key
+        (``front`` / ``down``). Negative pitch points downward in AirSim's
+        body frame (NED). We leave roll / yaw at zero.
+        """
+        assert self.client is not None
+        pitch_cfg = self.uav_cfg.get("camera_pitch_deg", None)
+        if pitch_cfg is None:
+            return
+        names = self.uav_cfg.get("airsim_camera_names", {}) or {}
+        if isinstance(pitch_cfg, dict):
+            mapping = {
+                names.get("front", "front_center"): pitch_cfg.get("front"),
+                names.get("down", "bottom_center"): pitch_cfg.get("down"),
+            }
+        else:
+            common = float(pitch_cfg)
+            mapping = {
+                names.get("front", "front_center"): common,
+                names.get("down", "bottom_center"): common,
+            }
+        for cam_name, pitch in mapping.items():
+            if pitch is None or cam_name is None:
+                continue
+            try:
+                pose = airsim.Pose(
+                    airsim.Vector3r(0.0, 0.0, 0.0),
+                    airsim.to_quaternion(math.radians(float(pitch)), 0.0, 0.0),
+                )
+                self.client.simSetCameraPose(cam_name, pose, vehicle_name=self.vehicle_name)
+                LOGGER.info("AirSim camera %s pitch set to %.1f deg", cam_name, float(pitch))
+            except Exception as e:  # pragma: no cover
+                LOGGER.warning("simSetCameraPose(%s, pitch=%s) failed: %s", cam_name, pitch, e)
+
     def get_state(self) -> Optional["airsim.MultirotorState"]:
         assert self.client is not None
         try:

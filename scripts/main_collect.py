@@ -18,6 +18,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -230,6 +231,7 @@ def main() -> int:
             build_ugv_camera_rig,
             build_relay_cameras,
             pull_image_for_frame,
+            pull_latest_image,
         )
         from src.trajectory import UavController, UgvController
         from src.airsim_client import (
@@ -276,6 +278,7 @@ def main() -> int:
 
         world = carla_world.world
         assert world is not None
+        sync_mode = bool(sim_cfg.get("synchronous_mode", True))
 
         registry = ActorRegistry(world)
 
@@ -320,6 +323,13 @@ def main() -> int:
             LOGGER.info("Writing calibration files...")
             write_ugv_calibration(paths, ugv_cfg)
             write_relay_calibration(paths, relay_cfg, relay_cams)
+            # AirSim's render-touching RPCs (simGetCameraInfo, simGetImages, ...)
+            # block until UE4 produces its next frame. With CARLA in synchronous
+            # mode the engine does not advance until world.tick(), so we must
+            # tick once before issuing the first sim* call or the future never
+            # completes.
+            if sync_mode:
+                world.tick()
             airsim_infos = airsim_client.get_camera_infos()
             write_uav_calibration(paths, uav_cfg, airsim_infos)
 
@@ -348,7 +358,11 @@ def main() -> int:
         )
 
         while not stop_requested["flag"] and sim_time < duration_s:
-            world_frame = world.tick()
+            if sync_mode:
+                world_frame = world.tick()
+            else:
+                snap = world.wait_for_tick(seconds=max(2.0, 10.0 * delta))
+                world_frame = int(snap.frame)
             counter.tick_count += 1
             sim_time = counter.tick_count * delta
 
@@ -360,9 +374,14 @@ def main() -> int:
                 continue
 
             # ---- Pull every CARLA sensor for THIS tick frame -----------
+            def _pull(sensor):
+                if sync_mode:
+                    return pull_image_for_frame(sensor, world_frame, timeout_s=sensor_timeout)
+                return pull_latest_image(sensor, timeout_s=sensor_timeout)
+
             ugv_images: Dict[str, Any] = {}
             for logical, sensor in ugv_rig.sensors.items():
-                img = pull_image_for_frame(sensor, world_frame, timeout_s=sensor_timeout)
+                img = _pull(sensor)
                 if img is None:
                     counter.dropped_sensor_frames += 1
                 ugv_images[logical] = img
@@ -370,21 +389,42 @@ def main() -> int:
             relay_payload: Dict[str, Dict[str, Any]] = {}
             for cam in relay_cams:
                 entry: Dict[str, Any] = {}
-                rgb_img = pull_image_for_frame(cam.rgb, world_frame, timeout_s=sensor_timeout)
+                rgb_img = _pull(cam.rgb)
                 if rgb_img is None:
                     counter.dropped_sensor_frames += 1
                 entry["rgb"] = rgb_img
                 if cam.depth is not None:
-                    depth_img = pull_image_for_frame(cam.depth, world_frame, timeout_s=sensor_timeout)
+                    depth_img = _pull(cam.depth)
                     if depth_img is None:
                         counter.dropped_sensor_frames += 1
                     entry["depth"] = depth_img
                 relay_payload[cam.name] = entry
 
             # ---- AirSim -------------------------------------------------
-            airsim_responses = airsim_client.capture_images()
-            airsim_state = airsim_client.get_state()
-            airsim_infos_now = airsim_client.get_camera_infos()
+            # AirSim's render-touching RPCs (simGetImages, simGetCameraInfo)
+            # block until UE4 produces a fresh render frame. In CARLA sync
+            # mode the engine only advances on world.tick(). MultirotorClient's
+            # tornado IOLoop is not thread-safe, so we keep AirSim calls on
+            # the main thread and tick the world from a background thread to
+            # unblock UE4. In async mode UE4 advances on its own.
+            if sync_mode:
+                _tick_thread = threading.Thread(target=world.tick, daemon=True)
+                _tick_thread.start()
+                try:
+                    airsim_responses = airsim_client.capture_images()
+                    airsim_state = airsim_client.get_state()
+                    airsim_infos_now = airsim_client.get_camera_infos()
+                finally:
+                    _tick_thread.join(timeout=max(5.0, 10.0 * delta))
+                    if _tick_thread.is_alive():
+                        LOGGER.warning(
+                            "world.tick() did not finish within %.2fs; CARLA may be unresponsive.",
+                            max(5.0, 10.0 * delta),
+                        )
+            else:
+                airsim_responses = airsim_client.capture_images()
+                airsim_state = airsim_client.get_state()
+                airsim_infos_now = airsim_client.get_camera_infos()
 
             # ---- Persist images ----------------------------------------
             file_ext = save_cfg.get("image_format", "png")
