@@ -2,28 +2,27 @@
 """
 main_collect.py
 ---------------
-End-to-end air / ground / relay synchronous data-collection driver for
-CARLA-Air.
+End-to-end CARLA-only synchronous data collection driver for the
+SAGENet evaluation sequence.
 
-Usage:
+Replaces the older CARLA + AirSim driver. The UAV is now a CARLA-native
+kinematic actor (see :mod:`src.carla_uav`) and trajectory is driven by
+:class:`src.trajectory.RelaySweepCoordinator` in cooperative mode.
+
+Usage::
     python scripts/main_collect.py --config configs/default.yaml
-
-Run from the repo root (``air_ground_relay_collect``).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import signal
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Make sure `src/` is importable when running this script directly.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -43,20 +42,18 @@ from src.save_utils import (
     write_json,
 )
 from src.geometry import (
-    airsim_pose_to_dict,
     carla_transform_to_dict,
     compute_camera_intrinsic,
 )
 from src.sync import FrameCounter, make_tick_save_planner
 
-# CARLA / AirSim side (imported lazily inside main so import errors are
-# reported through the logger rather than as a bare ImportError).
 
-
-# --------------------------------------------------------------------------- #
 LOGGER = logging.getLogger("collect")
 
 
+# --------------------------------------------------------------------------- #
+# Args
+# --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -78,10 +75,9 @@ def parse_args() -> argparse.Namespace:
 def write_ugv_calibration(paths: SequencePaths, ugv_cfg: Dict[str, Any]) -> None:
     cam_cfg = ugv_cfg["camera"]
     w, h = cam_cfg["resolution"]
-    intrin = compute_camera_intrinsic(w, h, cam_cfg["fov"])
     payload = {
         "sensor_mode": ugv_cfg["sensor_mode"],
-        "intrinsic": intrin,
+        "intrinsic": compute_camera_intrinsic(w, h, cam_cfg["fov"]),
         "extrinsic_in_vehicle_frame": {
             "location_xyz_m": list(cam_cfg["location"]),
             "rotation_rpy_deg": list(cam_cfg["rotation"]),
@@ -93,32 +89,19 @@ def write_ugv_calibration(paths: SequencePaths, ugv_cfg: Dict[str, Any]) -> None
     write_json(paths.calibration_dir / "ugv_intrinsics.json", payload)
 
 
-def write_uav_calibration(paths: SequencePaths, uav_cfg: Dict[str, Any], airsim_infos: Dict[str, Any]) -> None:
-    """Best-effort UAV intrinsics. We cannot get resolution from AirSim's
-    simGetCameraInfo, so we fall back to whatever was in settings.json (and
-    add a note about that)."""
-    payload: Dict[str, Any] = {
-        "coordinate": "airsim_ned",
-        "note": (
-            "AirSim camera resolution comes from settings.json; only fov can be "
-            "queried at runtime. Update width/height below to match your "
-            "settings.json if you need precise intrinsics."
-        ),
-        "cameras": {},
+def write_uav_calibration(paths: SequencePaths, uav_cfg: Dict[str, Any]) -> None:
+    cam_cfg = uav_cfg.get("camera", {}) or {}
+    res = cam_cfg.get("resolution", [1280, 720])
+    fov = float(cam_cfg.get("fov", 90.0))
+    payload = {
+        "coordinate": "carla",
+        "intrinsic": compute_camera_intrinsic(int(res[0]), int(res[1]), fov),
+        "extrinsic_in_body_frame": {
+            "location_xyz_m": list(cam_cfg.get("location", [0.0, 0.0, -0.3])),
+            "rotation_rpy_deg": [0.0, float(uav_cfg.get("camera_pitch_deg", -90.0)), 0.0],
+        },
+        "body_blueprint": uav_cfg.get("body_blueprint", "vehicle.diamondback.century"),
     }
-    for logical, info in airsim_infos.items():
-        # AirSim's `info.fov` is the horizontal FOV in degrees.
-        width = int(getattr(info, "width", 0) or 640)
-        height = int(getattr(info, "height", 0) or 480)
-        fov = float(getattr(info, "fov_deg", 90.0) or 90.0)
-        intrin = compute_camera_intrinsic(width, height, fov)
-        payload["cameras"][logical] = {
-            "airsim_camera": info.airsim_camera,
-            "intrinsic": intrin,
-            "pose_in_body_frame_ned": (
-                airsim_pose_to_dict(info.pose) if info.pose is not None else None
-            ),
-        }
     write_json(paths.calibration_dir / "uav_intrinsics.json", payload)
 
 
@@ -126,7 +109,7 @@ def write_relay_calibration(paths: SequencePaths, relay_cfg: Dict[str, Any], rel
     intrinsics: Dict[str, Any] = {"coordinate": "carla", "cameras": {}}
     extrinsics: Dict[str, Any] = {"coordinate": "carla", "cameras": {}}
     default_res = relay_cfg.get("default_resolution", [1280, 720])
-    default_fov = relay_cfg.get("default_fov", 90.0)
+    default_fov = relay_cfg.get("default_fov", 75.0)
     spec_by_name = {s["name"]: s for s in relay_cfg["cameras"]}
 
     for cam in relay_cams:
@@ -144,12 +127,11 @@ def write_relay_calibration(paths: SequencePaths, relay_cfg: Dict[str, Any], rel
 
 
 # --------------------------------------------------------------------------- #
-# Per-frame save helpers
+# Image-saving helpers
 # --------------------------------------------------------------------------- #
 def _save_carla_rgb(image, dest: Path) -> None:
     from src.sensors import carla_rgb_image_to_array
-    rgb = carla_rgb_image_to_array(image)
-    save_rgb_png(dest, rgb)
+    save_rgb_png(dest, carla_rgb_image_to_array(image))
 
 
 def _save_carla_depth(image, dest_npy: Optional[Path], dest_png: Optional[Path], max_m: float) -> None:
@@ -161,27 +143,6 @@ def _save_carla_depth(image, dest_npy: Optional[Path], dest_png: Optional[Path],
         save_depth_npy(dest_npy, depth_m)
     if dest_png is not None:
         save_depth_png_viz(dest_png, depth_m, max_m=max_m)
-
-
-def _save_airsim_rgb(resp, dest: Path) -> None:
-    from src.airsim_client import airsim_scene_to_rgb
-    rgb = airsim_scene_to_rgb(resp)
-    if rgb is None:
-        LOGGER.warning("AirSim RGB response empty; skipping %s", dest.name)
-        return
-    save_rgb_png(dest, rgb)
-
-
-def _save_airsim_depth(resp, dest_npy: Optional[Path], dest_png: Optional[Path], max_m: float) -> None:
-    from src.airsim_client import airsim_depth_to_meters
-    depth = airsim_depth_to_meters(resp)
-    if depth is None:
-        LOGGER.warning("AirSim depth response empty; skipping %s", dest_npy.name if dest_npy else "(png)")
-        return
-    if dest_npy is not None:
-        save_depth_npy(dest_npy, depth)
-    if dest_png is not None:
-        save_depth_png_viz(dest_png, depth, max_m=max_m)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +157,8 @@ def main() -> int:
     uav_cfg = cfg["uav"]
     relay_cfg = cfg["relay_cameras"]
     save_cfg = cfg["save"]
+    scene_cfg = cfg.get("scene", {}).get("dressing", {}) or {}
+    traj_cfg = cfg.get("trajectory", {}) or {}
 
     # ---- paths -----------------------------------------------------------
     paths = SequencePaths.build(
@@ -214,16 +177,14 @@ def main() -> int:
     LOGGER.info("Loaded config from %s", args.config)
     LOGGER.info("Sequence root: %s", paths.root)
 
-    # Dump a snapshot of the config so the dataset is self-describing.
     dump_config(cfg, paths.dataset_root / "dataset_config.yaml")
     dump_config(cfg, paths.root / "config_snapshot.yaml")
 
-    # Seed numpy for reproducibility.
     seed = sim_cfg.get("seed")
     if seed is not None:
         np.random.seed(int(seed))
 
-    # ---- lazy imports of CARLA / AirSim ---------------------------------
+    # ---- lazy imports ----------------------------------------------------
     try:
         from src.carla_client import CarlaWorld
         from src.actors import ActorRegistry, spawn_ugv
@@ -233,16 +194,18 @@ def main() -> int:
             pull_image_for_frame,
             pull_latest_image,
         )
-        from src.trajectory import UavController, UgvController
-        from src.airsim_client import (
-            AirsimClient,
-            airsim_state_to_dict,
+        from src.carla_uav import CarlaUav
+        from src.scene_dressing import dress_scene, stop_walker_controllers
+        from src.trajectory import (
+            RelaySweepCoordinator,
+            UgvController,
+            CarlaUavController,
         )
     except ImportError as e:
         LOGGER.error("Required python packages missing: %s", e)
         return 2
 
-    # Cooperative shutdown: catch Ctrl+C even on Windows.
+    # ---- signal handling -------------------------------------------------
     stop_requested = {"flag": False}
 
     def _on_sigint(signum, frame):  # noqa: ARG001
@@ -256,10 +219,10 @@ def main() -> int:
         except Exception:
             pass
 
-    # ---------------------------------------------------------------------
+    # ---- state -----------------------------------------------------------
     carla_world: Optional[CarlaWorld] = None
     registry: Optional[ActorRegistry] = None
-    airsim_client: Optional[AirsimClient] = None
+    dressing = None
 
     jsonl: Optional[JsonlWriter] = None
     ugv_pose_csv: Optional[PoseCsvWriter] = None
@@ -282,6 +245,12 @@ def main() -> int:
 
         registry = ActorRegistry(world)
 
+        # ----- coordinator (single source of truth for trajectories) -----
+        # Pass duration_seconds down so a config can omit it on the trajectory block.
+        traj_cfg.setdefault("duration_seconds", sim_cfg.get("duration_seconds", 60.0))
+        coordinator = RelaySweepCoordinator(traj_cfg)
+
+        # ----- spawn UGV ------------------------------------------------
         LOGGER.info("Spawning UGV...")
         ugv_vehicle = spawn_ugv(world, ugv_cfg, registry, seed=seed)
 
@@ -296,8 +265,6 @@ def main() -> int:
             cam.rgb.start()
             if cam.depth is not None:
                 cam.depth.start()
-
-        # Per-relay extrinsic files (useful when consumers grab a single cam).
         for cam in relay_cams:
             cam_dir = paths.relay_dir / cam.name
             cam_dir.mkdir(parents=True, exist_ok=True)
@@ -306,41 +273,44 @@ def main() -> int:
                 "transform": carla_transform_to_dict(cam.transform),
             })
 
-        # ----- UGV controller -------------------------------------------
-        ugv_ctrl = UgvController(ugv_vehicle, ugv_cfg, traffic_manager=carla_world.tm)
+        # ----- spawn UAV ------------------------------------------------
+        LOGGER.info("Spawning CARLA-native UAV...")
+        ugv_init_xy = (ugv_vehicle.get_transform().location.x,
+                       ugv_vehicle.get_transform().location.y)
+        x0, y0, z0, yaw0 = coordinator.uav_pose(0.0, ugv_xy=ugv_init_xy)
+        uav = CarlaUav.spawn(world, uav_cfg, registry,
+                             spawn_xy=[x0, y0], spawn_altitude_m=z0)
+
+        # ----- scene dressing (NPCs, static cars, props) ---------------
+        if scene_cfg:
+            LOGGER.info("Dressing the scene with NPCs and static props...")
+            dressing = dress_scene(
+                world, scene_cfg, relay_cfg["cameras"],
+                tm=carla_world.tm, registry=registry, seed=seed,
+            )
+
+        # ----- controllers ---------------------------------------------
+        ugv_ctrl = UgvController(ugv_vehicle, ugv_cfg, coordinator,
+                                 traffic_manager=carla_world.tm)
         ugv_ctrl.start()
-
-        # ----- AirSim ----------------------------------------------------
-        airsim_client = AirsimClient(sim_cfg, uav_cfg)
-        airsim_client.connect()
-        airsim_client.enable_and_arm()
-
-        uav_ctrl = UavController(airsim_client, uav_cfg, cfg.get("coords", {}))
+        uav_ctrl = CarlaUavController(uav, uav_cfg, coordinator)
         uav_ctrl.start()
 
-        # ----- Calibration ----------------------------------------------
+        # ----- calibration ---------------------------------------------
         if save_cfg.get("save_calibration", True):
             LOGGER.info("Writing calibration files...")
             write_ugv_calibration(paths, ugv_cfg)
+            write_uav_calibration(paths, uav_cfg)
             write_relay_calibration(paths, relay_cfg, relay_cams)
-            # AirSim's render-touching RPCs (simGetCameraInfo, simGetImages, ...)
-            # block until UE4 produces its next frame. With CARLA in synchronous
-            # mode the engine does not advance until world.tick(), so we must
-            # tick once before issuing the first sim* call or the future never
-            # completes.
-            if sync_mode:
-                world.tick()
-            airsim_infos = airsim_client.get_camera_infos()
-            write_uav_calibration(paths, uav_cfg, airsim_infos)
 
-        # ----- Writers ---------------------------------------------------
+        # ----- writers --------------------------------------------------
         if save_cfg.get("save_frames_jsonl", True):
             jsonl = JsonlWriter(paths.frames_jsonl)
         if save_cfg.get("save_pose_csv", True):
             ugv_pose_csv = PoseCsvWriter(paths.ugv_dir / "pose.csv", mode="euler")
-            uav_pose_csv = PoseCsvWriter(paths.uav_dir / "pose.csv", mode="quat")
+            uav_pose_csv = PoseCsvWriter(paths.uav_dir / "pose.csv", mode="euler")
 
-        # ----- Tick loop --------------------------------------------------
+        # ----- tick loop ----------------------------------------------
         planner = make_tick_save_planner(
             simulation_hz=float(sim_cfg.get("simulation_hz", 20.0)),
             save_hz=float(sim_cfg.get("save_hz", 10.0)),
@@ -353,11 +323,19 @@ def main() -> int:
         save_frame_id = 0
 
         LOGGER.info(
-            "Entering tick loop: duration=%.2fs, save_hz=%.2f, simulation_hz=%.2f, sensor_timeout=%.2fs",
-            duration_s, planner.save_hz, planner.simulation_hz, sensor_timeout,
+            "Entering tick loop: duration=%.2fs, save_hz=%.2f, simulation_hz=%.2f, "
+            "phases=%d, sync=%s",
+            duration_s, planner.save_hz, planner.simulation_hz,
+            len(coordinator.phases), sync_mode,
         )
 
         while not stop_requested["flag"] and sim_time < duration_s:
+            # -- step controllers BEFORE world.tick() so the new poses
+            # -- take effect this frame.
+            ugv_ctrl.step(sim_time)
+            ugv_loc = ugv_vehicle.get_transform().location
+            uav_ctrl.step(sim_time, ugv_xy=(ugv_loc.x, ugv_loc.y))
+
             if sync_mode:
                 world_frame = world.tick()
             else:
@@ -366,14 +344,15 @@ def main() -> int:
             counter.tick_count += 1
             sim_time = counter.tick_count * delta
 
-            ugv_ctrl.step()  # no-op for autopilot
-
-            counter.log_progress(every_n_ticks=int(planner.simulation_hz), duration_s=duration_s, current_t=sim_time)
+            counter.log_progress(
+                every_n_ticks=int(planner.simulation_hz),
+                duration_s=duration_s, current_t=sim_time,
+            )
 
             if not planner.should_save():
                 continue
 
-            # ---- Pull every CARLA sensor for THIS tick frame -----------
+            # ---- pull every sensor for THIS world frame ----------
             def _pull(sensor):
                 if sync_mode:
                     return pull_image_for_frame(sensor, world_frame, timeout_s=sensor_timeout)
@@ -386,58 +365,35 @@ def main() -> int:
                     counter.dropped_sensor_frames += 1
                 ugv_images[logical] = img
 
+            uav_images: Dict[str, Any] = {}
+            for logical, sensor in uav.cameras.items():
+                img = _pull(sensor)
+                if img is None:
+                    counter.dropped_sensor_frames += 1
+                uav_images[logical] = img
+
             relay_payload: Dict[str, Dict[str, Any]] = {}
             for cam in relay_cams:
-                entry: Dict[str, Any] = {}
-                rgb_img = _pull(cam.rgb)
-                if rgb_img is None:
+                entry: Dict[str, Any] = {"rgb": _pull(cam.rgb)}
+                if entry["rgb"] is None:
                     counter.dropped_sensor_frames += 1
-                entry["rgb"] = rgb_img
                 if cam.depth is not None:
-                    depth_img = _pull(cam.depth)
-                    if depth_img is None:
+                    entry["depth"] = _pull(cam.depth)
+                    if entry["depth"] is None:
                         counter.dropped_sensor_frames += 1
-                    entry["depth"] = depth_img
                 relay_payload[cam.name] = entry
 
-            # ---- AirSim -------------------------------------------------
-            # AirSim's render-touching RPCs (simGetImages, simGetCameraInfo)
-            # block until UE4 produces a fresh render frame. In CARLA sync
-            # mode the engine only advances on world.tick(). MultirotorClient's
-            # tornado IOLoop is not thread-safe, so we keep AirSim calls on
-            # the main thread and tick the world from a background thread to
-            # unblock UE4. In async mode UE4 advances on its own.
-            if sync_mode:
-                _tick_thread = threading.Thread(target=world.tick, daemon=True)
-                _tick_thread.start()
-                try:
-                    airsim_responses = airsim_client.capture_images()
-                    airsim_state = airsim_client.get_state()
-                    airsim_infos_now = airsim_client.get_camera_infos()
-                finally:
-                    _tick_thread.join(timeout=max(5.0, 10.0 * delta))
-                    if _tick_thread.is_alive():
-                        LOGGER.warning(
-                            "world.tick() did not finish within %.2fs; CARLA may be unresponsive.",
-                            max(5.0, 10.0 * delta),
-                        )
-            else:
-                airsim_responses = airsim_client.capture_images()
-                airsim_state = airsim_client.get_state()
-                airsim_infos_now = airsim_client.get_camera_infos()
-
-            # ---- Persist images ----------------------------------------
+            # ---- persist images ---------------------------------------
             file_ext = save_cfg.get("image_format", "png")
             png_name = frame_filename(save_frame_id, file_ext)
             npy_name = frame_filename(save_frame_id, "npy")
-            depth_png_name = frame_filename(save_frame_id, "png")
             depth_max_m = float(save_cfg.get("depth_png_max_m", 80.0))
             save_depth_npy_flag = bool(save_cfg.get("save_depth_npy", True))
             save_depth_png_flag = bool(save_cfg.get("save_depth_png", True))
 
             images_index: Dict[str, str] = {}
 
-            # UGV RGB / stereo
+            # UGV
             for logical, img in ugv_images.items():
                 if img is None:
                     continue
@@ -447,57 +403,46 @@ def main() -> int:
                     images_index[f"ugv_{logical}"] = paths.rel(dest)
                 elif logical == "front_depth":
                     dest_npy = paths.ugv_subdirs[logical] / npy_name if save_depth_npy_flag else None
-                    dest_png = paths.ugv_subdirs[logical] / depth_png_name if save_depth_png_flag else None
+                    dest_png = paths.ugv_subdirs[logical] / png_name if save_depth_png_flag else None
                     _save_carla_depth(img, dest_npy, dest_png, depth_max_m)
                     if dest_npy is not None:
                         images_index["ugv_front_depth"] = paths.rel(dest_npy)
                     elif dest_png is not None:
                         images_index["ugv_front_depth"] = paths.rel(dest_png)
 
-            # UAV
-            uav_cam_flags = uav_cfg.get("cameras", {}) or {}
-            if uav_cam_flags.get("front_rgb") and "front_rgb" in airsim_responses:
-                dest = paths.uav_subdirs["front_rgb"] / png_name
-                _save_airsim_rgb(airsim_responses["front_rgb"], dest)
-                images_index["uav_front_rgb"] = paths.rel(dest)
-            if uav_cam_flags.get("front_depth") and "front_depth" in airsim_responses:
-                dest_npy = paths.uav_subdirs["front_depth"] / npy_name if save_depth_npy_flag else None
-                dest_png = paths.uav_subdirs["front_depth"] / depth_png_name if save_depth_png_flag else None
-                _save_airsim_depth(airsim_responses["front_depth"], dest_npy, dest_png, depth_max_m)
-                if dest_npy is not None:
-                    images_index["uav_front_depth"] = paths.rel(dest_npy)
-            if uav_cam_flags.get("down_rgb") and "down_rgb" in airsim_responses:
-                dest = paths.uav_subdirs["down_rgb"] / png_name
-                _save_airsim_rgb(airsim_responses["down_rgb"], dest)
-                images_index["uav_down_rgb"] = paths.rel(dest)
-            if uav_cam_flags.get("down_depth") and "down_depth" in airsim_responses:
-                dest_npy = paths.uav_subdirs["down_depth"] / npy_name if save_depth_npy_flag else None
-                dest_png = paths.uav_subdirs["down_depth"] / depth_png_name if save_depth_png_flag else None
-                _save_airsim_depth(airsim_responses["down_depth"], dest_npy, dest_png, depth_max_m)
-                if dest_npy is not None:
-                    images_index["uav_down_depth"] = paths.rel(dest_npy)
+            # UAV (CARLA-native, same code path as relay/ugv)
+            for logical, img in uav_images.items():
+                if img is None:
+                    continue
+                if logical == "front_rgb":
+                    dest = paths.uav_subdirs["front_rgb"] / png_name
+                    _save_carla_rgb(img, dest)
+                    images_index["uav_front_rgb"] = paths.rel(dest)
+                elif logical == "front_depth":
+                    dest_npy = paths.uav_subdirs["front_depth"] / npy_name if save_depth_npy_flag else None
+                    dest_png = paths.uav_subdirs["front_depth"] / png_name if save_depth_png_flag else None
+                    _save_carla_depth(img, dest_npy, dest_png, depth_max_m)
+                    if dest_npy is not None:
+                        images_index["uav_front_depth"] = paths.rel(dest_npy)
+                    elif dest_png is not None:
+                        images_index["uav_front_depth"] = paths.rel(dest_png)
 
             # Relay
             for cam in relay_cams:
                 entry = relay_payload[cam.name]
-                rgb_img = entry.get("rgb")
-                if rgb_img is not None:
+                if entry.get("rgb") is not None:
                     dest = paths.relay_subdirs[cam.name]["rgb"] / png_name
-                    _save_carla_rgb(rgb_img, dest)
+                    _save_carla_rgb(entry["rgb"], dest)
                     images_index[f"{cam.name}_rgb"] = paths.rel(dest)
-                depth_img = entry.get("depth")
-                if depth_img is not None:
+                if entry.get("depth") is not None:
                     dest_npy = paths.relay_subdirs[cam.name]["depth"] / npy_name if save_depth_npy_flag else None
-                    dest_png = paths.relay_subdirs[cam.name]["depth"] / depth_png_name if save_depth_png_flag else None
-                    _save_carla_depth(depth_img, dest_npy, dest_png, depth_max_m)
+                    dest_png = paths.relay_subdirs[cam.name]["depth"] / png_name if save_depth_png_flag else None
+                    _save_carla_depth(entry["depth"], dest_npy, dest_png, depth_max_m)
                     if dest_npy is not None:
                         images_index[f"{cam.name}_depth"] = paths.rel(dest_npy)
 
-            # ---- Poses --------------------------------------------------
-            ugv_tf = ugv_vehicle.get_transform()
-            ugv_pose_dict = carla_transform_to_dict(ugv_tf)
-
-            # UGV camera world pose: use the first attached sensor.
+            # ---- poses + phase label -------------------------------
+            ugv_pose_dict = carla_transform_to_dict(ugv_vehicle.get_transform())
             ugv_cam_pose_dict: Dict[str, float] = {}
             for s in ugv_rig.sensors.values():
                 try:
@@ -506,29 +451,12 @@ def main() -> int:
                 except Exception:
                     continue
 
-            uav_state_dict = airsim_state_to_dict(airsim_state)
-            uav_pose_dict: Dict[str, float] = {}
-            if airsim_state is not None:
-                try:
-                    uav_pose_dict = airsim_pose_to_dict(airsim_state.kinematics_estimated)  # type: ignore[arg-type]
-                except Exception:
-                    # Fall back to flattening manually.
-                    if "position_ned" in uav_state_dict:
-                        pos = uav_state_dict["position_ned"]
-                        ori = uav_state_dict.get("orientation_quat_wxyz", {})
-                        uav_pose_dict = {
-                            "x": pos["x"], "y": pos["y"], "z": pos["z"],
-                            "qw": ori.get("w", 1.0), "qx": ori.get("x", 0.0),
-                            "qy": ori.get("y", 0.0), "qz": ori.get("z", 0.0),
-                        }
-
+            uav_pose_dict = carla_transform_to_dict(uav.get_transform())
             uav_cam_poses: Dict[str, Dict[str, float]] = {}
-            for logical, info in airsim_infos_now.items():
-                if info.pose is not None:
-                    try:
-                        uav_cam_poses[logical] = airsim_pose_to_dict(info.pose)
-                    except Exception:
-                        pass
+            for logical in uav.cameras:
+                tf = uav.get_camera_transform(logical)
+                if tf is not None:
+                    uav_cam_poses[logical] = carla_transform_to_dict(tf)
 
             relay_cam_poses: Dict[str, Dict[str, float]] = {}
             for cam in relay_cams:
@@ -537,36 +465,34 @@ def main() -> int:
                 except Exception:
                     relay_cam_poses[cam.name] = carla_transform_to_dict(cam.transform)
 
-            # ---- Writers ------------------------------------------------
+            phase_name, phase_relay = coordinator.phase_label(sim_time)
+
             frame_record = {
                 "frame_id": save_frame_id,
                 "carla_frame": int(world_frame),
                 "sim_time": float(sim_time),
                 "sequence": sim_cfg.get("sequence_name", "seq_001"),
                 "map": sim_cfg.get("map", ""),
+                "phase": phase_name,
+                "expected_covis_relay": phase_relay,
                 "images": images_index,
                 "ugv_pose_carla": ugv_pose_dict,
                 "ugv_camera_pose_carla": ugv_cam_pose_dict,
-                "uav_pose_airsim_ned": uav_pose_dict,
-                "uav_state_airsim_ned": uav_state_dict,
-                "uav_camera_pose_airsim_ned": uav_cam_poses,
+                "uav_pose_carla": uav_pose_dict,
+                "uav_camera_poses_carla": uav_cam_poses,
                 "relay_camera_poses_carla": relay_cam_poses,
             }
-
             if jsonl is not None:
                 jsonl.write(frame_record)
             if ugv_pose_csv is not None:
                 ugv_pose_csv.write(save_frame_id, sim_time, ugv_pose_dict)
-            if uav_pose_csv is not None and uav_pose_dict:
+            if uav_pose_csv is not None:
                 uav_pose_csv.write(save_frame_id, sim_time, uav_pose_dict)
-
-            # ---- Per-save callbacks ------------------------------------
-            uav_ctrl.on_saved_frame(ugv_vehicle)
 
             counter.saved += 1
             save_frame_id += 1
 
-        # ----- trajectory.yaml ------------------------------------------
+        # ----- trajectory.yaml summary -----------------------------
         if save_cfg.get("save_trajectory_yaml", True):
             import yaml
             traj = {
@@ -578,8 +504,11 @@ def main() -> int:
                 "fixed_delta_seconds": delta,
                 "simulation_hz": float(sim_cfg.get("simulation_hz", 20.0)),
                 "save_hz": float(sim_cfg.get("save_hz", 10.0)),
-                "ugv_mode": ugv_cfg.get("control_mode", "autopilot"),
-                "uav_mode": uav_cfg.get("mode", "follow_ugv"),
+                "phases": [
+                    {"name": p.name, "t_start": p.t_start, "t_end": p.t_end,
+                     "expected_relay": p.expected_relay}
+                    for p in coordinator.phases
+                ],
             }
             with paths.trajectory_yaml.open("w", encoding="utf-8") as fp:
                 yaml.safe_dump(traj, fp, sort_keys=False)
@@ -592,20 +521,18 @@ def main() -> int:
     finally:
         LOGGER.info("Cleaning up...")
 
-        # Close writers first so partial CSV/JSONL still flush.
+        if dressing is not None:
+            stop_walker_controllers(dressing)
+
         for w in (jsonl, ugv_pose_csv, uav_pose_csv):
             if w is not None:
                 w.close()
 
-        # Stop CARLA sensors before destroying their actors.
         if registry is not None:
             registry.destroy_all()
 
         if carla_world is not None:
             carla_world.shutdown()
-
-        if airsim_client is not None:
-            airsim_client.shutdown()
 
         wall_dt = time.time() - start_wall
         LOGGER.info(

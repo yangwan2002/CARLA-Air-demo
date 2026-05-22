@@ -1,0 +1,130 @@
+# Quick 40 s smoke run — same single-lap ring as paper_eval_v2.yaml.
+simulation:
+  map: Town10HD
+  carla_host: localhost
+  carla_port: 2000
+  synchronous_mode: true
+  fixed_delta_seconds: 0.05
+  simulation_hz: 20
+  save_hz: 5
+  duration_seconds: 40
+  output_dir: /root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim
+  sequence_name: paper_eval_v2_40s
+  seed: 2024
+  weather:
+    cloudiness: 10.0
+    precipitation: 0.0
+    sun_altitude_angle: 70.0
+
+ugv:
+  blueprint: vehicle.tesla.model3
+  role_name: ugv_collector
+  spawn_point_index: 49
+  spawn_xy: null
+  speed_mps: 8.0
+  tm_speed_difference_pct: 45.0
+  stop_radius_m: 4.0
+  loop_mode: true
+  reloop_cooldown_s: 8.0
+  sensor_mode: rgbd
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [1.5, 0.0, 1.6]
+    rotation: [0.0, 0.0, 0.0]
+    stereo_baseline_m: 0.2
+    stereo_capture_depth: false
+
+uav:
+  body_blueprint: vehicle.diamondback.century
+  role_name: uav_collector
+  altitude_m: 35.0
+  spawn_altitude_m: 35.0
+  min_altitude_m: 5.0
+  spawn_xy: [-0.76, 24.6]
+  camera_pitch_deg: -45.0
+  cameras:
+    front_rgb: true
+    front_depth: true
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [0.0, 0.0, -0.3]
+
+trajectory:
+  uav_default_speed_mps: 6.5
+  phases:
+    - name: boulevard_1lap_cw
+      t_start: 0.0
+      t_end: 105.0
+      expected_relay: null
+      uav_follow_ugv: true
+      uav_yaw_mode: follow_path
+      uav_path:
+        - [-0.76, 24.6, 35.0]
+      ugv_path:
+        - [20.0, 24.6]
+        - [40.0, 24.6]
+        - [52.0, 24.6]
+        - [55.0, 22.0]
+        - [54.0, 20.0]
+        - [53.0, 18.0]
+        - [52.0, 16.6]
+        - [30.0, 16.6]
+        - [10.0, 16.6]
+        - [-10.0, 16.6]
+        - [-30.0, 16.6]
+        - [-52.0, 16.6]
+        - [-55.0, 18.0]
+        - [-54.0, 20.0]
+        - [-53.0, 22.0]
+        - [-52.0, 24.6]
+        - [-30.0, 24.6]
+        - [-0.76, 24.6]
+
+relay_cameras:
+  default_resolution: [1280, 720]
+  default_fov: 90.0
+  default_use_depth: true
+  cameras:
+    - name: relay_01
+      location: [-30.0, 40.0, 10.0]
+      look_at: [-30.0, 25.5, 0.4]
+      use_depth: true
+    - name: relay_02
+      location: [0.0, 36.0, 10.0]
+      look_at: [0.0, 25.5, 0.4]
+      use_depth: true
+    - name: relay_03
+      location: [30.0, 40.0, 10.0]
+      look_at: [30.0, 25.5, 0.4]
+      use_depth: true
+    - name: relay_04
+      location: [-15.0, 0.0, 10.0]
+      look_at: [-15.0, 15.0, 0.4]
+      use_depth: true
+    - name: relay_05
+      location: [15.0, 0.0, 10.0]
+      look_at: [15.0, 15.0, 0.4]
+      use_depth: true
+
+scene:
+  dressing:
+    moving_npc_vehicles: 12
+    npc_vehicle_filters:
+      - vehicle.audi.*
+      - vehicle.tesla.*
+    walkers: 20
+    per_relay:
+      default:
+        static_vehicles: 0
+        props: []
+
+save:
+  image_format: png
+  save_depth_npy: false
+  save_depth_png: false
+  save_frames_jsonl: true
+  save_pose_csv: true
+  save_calibration: true
+  save_trajectory_yaml: true

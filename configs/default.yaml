@@ -1,33 +1,34 @@
 # =============================================================================
-# CARLA-Air air-ground-relay - paper-evaluation config
+# CARLA-Air air-ground-relay - SAGENet paper-evaluation config
 # =============================================================================
-# Geometry
-#   * UGV drives a fixed ~80m square waypoint loop centred near the world
-#     origin in Town10HD.
-#   * UAV flies a stacked square loop at 3 altitudes (15 / 30 / 60 m) above
-#     the same centre, so UAV-UGV pairs span a wide range of overlap ratios
-#     and scale ratios. The UAV camera is nadir (pitch -90 deg) so MegaDepth-
-#     trained matchers see a familiar bird's-eye view.
-#   * 5 relay cameras sit at the corners + middle of the loop, mounted at
-#     ~7-9 m height and angled forward-downward (~25-35 deg pitch), the way
-#     real surveillance cameras are. Their look_at points were chosen so the
-#     UGV passes through each FOV at least once per loop.
+# Town10HD central layout (verified by raycast LOS + waypoint snap):
 #
-# CARLA uses x-forward / y-right / z-up (left-handed). AirSim is NED.
+#     y=  0  ─ south sidewalk ─ ●relay_04(-15)  ●relay_05(15) ─
+#     y= 13  ════ west-bound lane ════════════════════════════
+#     y= 17  ════ east-bound lane ════════════════════════════  ← UGV phase 3 westbound
+#     y= 21  ──── plaza centerline ────────────────────────────
+#     y= 25  ════ west-bound lane ════════════════════════════  ← UGV phase 1 eastbound
+#     y= 28  ════ east-bound lane ════════════════════════════
+#     y= 36  ─ N sidewalk ─ ●relay_02 ────────────────
+#     y= 40  ─ N sidewalk ─ ●relay_01(-30) ●relay_03(30)
+#
+# Relays: 10 m high, ~15 m horizontal from lane, FOV 90°, pitch ~-33°
+#         => each relay's footprint on the lane plane ≈ 35 m × 20 m
+# UAV: 30 m altitude, FOV 90°, nadir => footprint ≈ 60 m × 34 m
+#      Speed: 6 m/s cruising; hovers when it reaches a phase endpoint.
+# UGV: autopilot via TM, ~5 m/s along the lane network.
 # =============================================================================
 
 simulation:
   map: Town10HD
   carla_host: localhost
   carla_port: 2000
-  airsim_host: localhost
-  airsim_port: 41451
-  synchronous_mode: false        # async needed because CARLA<->AirSim sync deadlocks
+  synchronous_mode: true
   fixed_delta_seconds: 0.05
   simulation_hz: 20
   save_hz: 10
-  duration_seconds: 60           # ~600 saved frames
-  output_dir: ./AirGroundRelay-Sim
+  duration_seconds: 60          # full sequence
+  output_dir: /root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim
   sequence_name: paper_eval_001
   seed: 2024
   weather:
@@ -36,26 +37,15 @@ simulation:
     sun_altitude_angle: 70.0
 
 # -----------------------------------------------------------------------------
-# Ground vehicle (UGV)
+# UGV (autopilot + TM-routed)
 # -----------------------------------------------------------------------------
 ugv:
   blueprint: vehicle.tesla.model3
   role_name: ugv_collector
-  spawn_point_index: 0
-  spawn_xy: [40.0, -40.0]        # CARLA (x, y); set null to use spawn_point_index
-  spawn_yaw_deg: 90.0            # initial heading (toward +y)
-  control_mode: waypoint         # "autopilot" or "waypoint"
+  spawn_point_index: 49         # (-0.76, 24.61) yaw=0.2
+  spawn_xy: null
   speed_mps: 5.0
-  autopilot:
-    ignore_lights_percentage: 100.0
-    ignore_signs_percentage: 100.0
-    vehicle_percentage_speed_difference: 0.0
-  waypoints:
-    - [ 40.0,  40.0, 0.0]
-    - [-40.0,  40.0, 0.0]
-    - [-40.0, -40.0, 0.0]
-    - [ 40.0, -40.0, 0.0]
-    - [ 40.0,  40.0, 0.0]   # close the loop
+  tm_speed_difference_pct: 70.0
 
   sensor_mode: rgbd
   camera:
@@ -67,83 +57,217 @@ ugv:
     stereo_capture_depth: false
 
 # -----------------------------------------------------------------------------
-# Aerial vehicle (UAV)
+# UAV (CARLA-native, 30 m fixed altitude, speed-driven)
 # -----------------------------------------------------------------------------
 uav:
-  vehicle_name: ""
-  mode: patrol_multi_alt         # "follow_ugv" | "hover" | "waypoint" | "patrol_multi_alt"
-  takeoff_timeout_s: 8.0
-  altitude_m: 15.0
-  speed_mps: 5.0
+  body_blueprint: vehicle.diamondback.century
+  role_name: uav_collector
+  altitude_m: 30.0
+  spawn_altitude_m: 30.0
+  min_altitude_m: 5.0
+  spawn_xy: [-40.0, 10.0]       # SW corner, off-axis at t=0
 
-  patrol:
-    altitudes_m: [15.0, 30.0, 60.0]
-    half_size_m: 40.0
-    center_ned: [0.0, 0.0]
-    yaw_offset_deg: 0.0
-
-  camera_pitch_deg:
-    front: -90.0                 # nadir for paper evaluation
-    down:  -90.0
-
-  follow_offset:                 # only used when mode == follow_ugv
-    behind_m: 8.0
-    right_m: 0.0
-    altitude_m: 30.0
-    update_every_n_saves: 1
-
-  waypoints_ned: []
+  camera_pitch_deg: -45.0       # oblique down: sees ground + building facades
 
   cameras:
     front_rgb: true
     front_depth: true
-    down_rgb: false              # front camera is now nadir, so "down" is redundant
-    down_depth: false
-  airsim_camera_names:
-    front: "0"
-    down:  "0"
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [0.0, 0.0, -0.3]
 
 # -----------------------------------------------------------------------------
-# Fixed relay (surveillance) cameras
+# Cooperative trajectory — UAV walks uav_path at uav_speed_mps, hovers at end.
+# UGV is autopiloted toward the LAST waypoint of each phase's ugv_path via TM.
+# -----------------------------------------------------------------------------
+trajectory:
+  uav_default_speed_mps: 6.0
+  phases:
+    # Phase 1 (15 s) — UGV cruises east on y=25; UAV does a long approach
+    # from the SW corner toward relay_02 territory. They get gradually closer.
+    # UGV: (-1, 25) -> (30, 25)              31 m at ~5 m/s
+    # UAV: (-40, 10, 30) -> (-10, 18, 30)    33 m at ~3 m/s (slow cruise)
+    # End of phase: UGV at x=30, UAV at x=-10 -> still ~40 m apart
+    - name: independent
+      t_start: 0.0
+      t_end: 15.0
+      expected_relay: null
+      uav_speed_mps: 3.0
+      ugv_path:
+        - [ 30.0, 25.0]
+      uav_path:
+        - [-40.0, 10.0, 30.0]
+        - [-10.0, 18.0, 30.0]
+      uav_yaw_mode: follow_path
+
+    # Phase 2 (15 s) — three-view covis at relay_02 (cam (0,36,10), lookat (0,25.5))
+    # UGV turns south at the eastern intersection, comes back west to relay_02.
+    # UAV slows down and drifts the last 11 m to land on relay_02's lookat at 30 m.
+    # UGV: (40, 25) -> (40, 17) -> (0, 17)   48 m at ~5 m/s (uses TM, may not finish)
+    # UAV: (-10, 18, 30) -> (0, 25, 30)      11 m at 1 m/s = arrives at t=11s, hovers ~4 s
+    - name: covis_relay_02
+      t_start: 15.0
+      t_end: 30.0
+      expected_relay: relay_02
+      uav_speed_mps: 1.0
+      ugv_path:
+        - [ 40.0, 25.0]
+        - [ 40.0, 17.0]
+        - [  0.0, 17.0]
+      uav_path:
+        - [-10.0, 18.0, 30.0]
+        - [  0.0, 25.0, 30.0]
+      uav_yaw_mode: track_ugv
+
+    # Phase 3 (15 s) — scale variation. UGV continues west on y=17.
+    # UAV drifts EAST then SOUTH so its scale ratio vs UGV sweeps from ~1:1 to ~1:5.
+    # UGV: (0, 17) -> (-30, 17)              30 m at ~5 m/s
+    # UAV: (0, 25) -> (30, 25) -> (15, 17)   ~46 m at 3 m/s
+    # UGV-UAV horizontal distance grows from ~10 m to ~45 m during this phase.
+    - name: scale_var
+      t_start: 30.0
+      t_end: 45.0
+      expected_relay: null
+      uav_speed_mps: 3.0
+      ugv_path:
+        - [-30.0, 17.0]
+      uav_path:
+        - [  0.0, 25.0, 30.0]
+        - [ 30.0, 25.0, 30.0]
+        - [ 15.0, 17.0, 30.0]
+      uav_yaw_mode: follow_path
+
+    # Phase 4 (15 s) — three-view covis at relay_04 (cam (-15,0,10), lookat (-15,15))
+    # UGV stops near (-15, 17) (it should already be passing through from phase 3).
+    # UAV flies west from (15, 17) to (-15, 17), 30 m at 2 m/s = 15 s
+    # so UAV arrives precisely at the end of phase 4 (right above UGV).
+    - name: covis_relay_04
+      t_start: 45.0
+      t_end: 60.0
+      expected_relay: relay_04
+      uav_speed_mps: 2.0
+      ugv_path:
+        - [-15.0, 17.0]
+      uav_path:
+        - [ 15.0, 17.0, 30.0]
+        - [-15.0, 17.0, 30.0]
+      uav_yaw_mode: track_ugv
+
+# -----------------------------------------------------------------------------
+# Relay cameras (v3) — 10 m high, ~15 m horizontal, FOV 90°, all LOS verified
 # -----------------------------------------------------------------------------
 relay_cameras:
   default_resolution: [1280, 720]
-  default_fov: 75.0
+  default_fov: 90.0
   default_use_depth: true
   cameras:
-    - name: relay_01             # NW corner pole, looks SE into the loop
-      location: [-50.0,  50.0, 8.0]
-      look_at:  [-10.0,  10.0, 1.5]
+    - name: relay_01             # NW pole on north sidewalk
+      location: [-30.0, 40.0, 10.0]
+      look_at:  [-30.0, 25.5, 0.4]
       resolution: [1280, 720]
-      fov: 75.0
+      fov: 90.0
       use_depth: true
-    - name: relay_02             # NE corner pole, looks SW into the loop
-      location: [ 50.0,  50.0, 8.0]
-      look_at:  [ 10.0,  10.0, 1.5]
+    - name: relay_02             # central north pole — densest scene dressing
+      location: [  0.0, 36.0, 10.0]
+      look_at:  [  0.0, 25.5, 0.4]
       resolution: [1280, 720]
-      fov: 75.0
+      fov: 90.0
       use_depth: true
-    - name: relay_03             # SE corner pole, looks NW into the loop
-      location: [ 50.0, -50.0, 8.0]
-      look_at:  [ 10.0, -10.0, 1.5]
+    - name: relay_03             # NE pole
+      location: [ 30.0, 40.0, 10.0]
+      look_at:  [ 30.0, 25.5, 0.4]
       resolution: [1280, 720]
-      fov: 75.0
+      fov: 90.0
       use_depth: true
-    - name: relay_04             # SW corner pole, looks NE into the loop
-      location: [-50.0, -50.0, 8.0]
-      look_at:  [-10.0, -10.0, 1.5]
+    - name: relay_04             # SW pole on south sidewalk — phase 4 anchor
+      location: [-15.0,  0.0, 10.0]
+      look_at:  [-15.0, 15.0, 0.4]
       resolution: [1280, 720]
-      fov: 75.0
+      fov: 90.0
       use_depth: true
-    - name: relay_05             # mid-east pole, looks W across the loop
-      location: [ 55.0,   0.0, 9.0]
-      look_at:  [  0.0,   0.0, 1.5]
+    - name: relay_05             # SE pole
+      location: [ 15.0,  0.0, 10.0]
+      look_at:  [ 15.0, 15.0, 0.4]
       resolution: [1280, 720]
-      fov: 75.0
+      fov: 90.0
       use_depth: true
 
 # -----------------------------------------------------------------------------
-# Data persistence
+# Scene dressing — per-relay semantic density
+# -----------------------------------------------------------------------------
+scene:
+  dressing:
+    moving_npc_vehicles: 8
+    npc_vehicle_filters:
+      - vehicle.audi.*
+      - vehicle.tesla.*
+      - vehicle.mercedes.*
+      - vehicle.nissan.*
+      - vehicle.toyota.*
+      - vehicle.mini.*
+    walkers: 14
+
+    per_relay:
+      relay_02:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.audi.tt
+          - vehicle.mercedes.coupe
+          - vehicle.nissan.micra
+          - vehicle.mini.cooper_s
+        props:
+          - { blueprint: vehicle.gazelle.omafiets,    count: 1 }
+          - { blueprint: vehicle.vespa.zx125,         count: 1 }
+          - { blueprint: static.prop.advertisement,   count: 1 }
+          - { blueprint: static.prop.trashcan04,      count: 2 }
+          - { blueprint: static.prop.bench01,         count: 1 }
+          - { blueprint: static.prop.cypresstree,     count: 1 }
+
+      relay_01:
+        ring_radius_m: 5.0
+        static_vehicles: 2
+        static_vehicle_blueprints:
+          - vehicle.toyota.prius
+          - vehicle.audi.a2
+        props:
+          - { blueprint: vehicle.diamondback.century, count: 1 }
+          - { blueprint: static.prop.kiosk_01,        count: 1 }
+          - { blueprint: static.prop.trashcan02,      count: 1 }
+          - { blueprint: static.prop.streetbarrier,   count: 1 }
+          - { blueprint: static.prop.aporosatree,     count: 1 }
+
+      relay_03:
+        ring_radius_m: 5.0
+        static_vehicles: 2
+        static_vehicle_blueprints:
+          - vehicle.chevrolet.impala
+          - vehicle.citroen.c3
+        props:
+          - { blueprint: static.prop.bench02,         count: 1 }
+          - { blueprint: static.prop.trashcan03,      count: 1 }
+          - { blueprint: static.prop.advertisement,   count: 1 }
+
+      relay_05:
+        ring_radius_m: 5.0
+        static_vehicles: 1
+        static_vehicle_blueprints:
+          - vehicle.seat.leon
+        props:
+          - { blueprint: static.prop.trashcan05,      count: 1 }
+
+      relay_04:
+        ring_radius_m: 5.0
+        static_vehicles: 0
+        props: []
+
+      default:
+        static_vehicles: 0
+        props: []
+
+# -----------------------------------------------------------------------------
+# Persistence
 # -----------------------------------------------------------------------------
 save:
   image_format: png
@@ -155,11 +279,3 @@ save:
   save_calibration: true
   save_trajectory_yaml: true
   jsonl_filename: frames.jsonl
-
-# -----------------------------------------------------------------------------
-# Coordinate-transform options
-# -----------------------------------------------------------------------------
-coords:
-  carla_to_airsim_ned:
-    origin_offset_carla: [0.0, 0.0, 0.0]
-    yaw_offset_deg: 0.0

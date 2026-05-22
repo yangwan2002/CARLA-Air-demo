@@ -25,6 +25,7 @@ REQUIRED_TOP_LEVEL_KEYS = (
     "ugv",
     "uav",
     "relay_cameras",
+    "trajectory",
     "save",
 )
 
@@ -48,11 +49,9 @@ def _validate(cfg: Dict[str, Any]) -> None:
             f"ugv.sensor_mode must be 'rgbd' or 'stereo', got {ugv.get('sensor_mode')!r}"
         )
 
-    uav = cfg["uav"]
-    if uav.get("mode") not in {"follow_ugv", "hover", "waypoint"}:
-        raise ValueError(
-            f"uav.mode must be follow_ugv / hover / waypoint, got {uav.get('mode')!r}"
-        )
+    traj = cfg["trajectory"]
+    if not traj.get("phases"):
+        raise ValueError("trajectory.phases must be a non-empty list")
 
 
 def load_config(path: str | os.PathLike) -> Dict[str, Any]:

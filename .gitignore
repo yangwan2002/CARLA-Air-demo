@@ -4,3 +4,22 @@ __pycache__/
 .venv/
 *.log
 settings.json.new
+
+# Diagnostic / one-off shell scripts (local dev only)
+scripts/_diag*.sh
+scripts/_make_*.sh
+scripts/_run_collect.sh
+scripts/_wait_ports.sh
+scripts/_launch_carla_remote.sh
+
+# Local secrets / SSH credentials
+.env
+*.secret
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store

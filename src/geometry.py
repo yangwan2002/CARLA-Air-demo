@@ -64,18 +64,17 @@ def compute_camera_intrinsic(width: int, height: int, fov_deg: float) -> Dict[st
 def look_at_yaw_pitch(location: Iterable[float], target: Iterable[float]) -> Tuple[float, float]:
     """Compute (yaw_deg, pitch_deg) for a CARLA camera pointed at `target`.
 
-    CARLA's convention:
+    CARLA's convention (verified empirically):
         * yaw = 0  ->  +X (forward in world space)
-        * positive yaw rotates toward +Y (left-handed, "right" in screen)
-        * positive pitch points DOWNWARD (this is non-standard but it is how
-          CARLA's UE4 backend defines it)
+        * positive yaw rotates toward +Y
+        * NEGATIVE pitch points DOWNWARD (matches our nadir UAV cam at -90)
 
-    Therefore for a vector (dx, dy, dz) from camera to target:
-        yaw   =  atan2(dy, dx)                      [degrees]
-        pitch = -atan2(dz, sqrt(dx*dx + dy*dy))     [degrees]
+    For a vector (dx, dy, dz) from camera to target:
+        yaw   = atan2(dy, dx)                      [degrees]
+        pitch = atan2(dz, sqrt(dx*dx + dy*dy))     [degrees]
 
-    The minus sign in pitch is what makes "looking down at the street"
-    correspond to a positive pitch value in CARLA.
+    With this sign convention, target below camera (dz < 0) yields pitch < 0,
+    i.e. the camera looks downward, which matches CARLA's actual behaviour.
     """
     lx, ly, lz = (float(v) for v in location)
     tx, ty, tz = (float(v) for v in target)
@@ -83,8 +82,7 @@ def look_at_yaw_pitch(location: Iterable[float], target: Iterable[float]) -> Tup
 
     yaw = math.degrees(math.atan2(dy, dx))
     horiz = math.hypot(dx, dy)
-    # CARLA pitch is negated relative to the "+pitch up" convention.
-    pitch = -math.degrees(math.atan2(dz, horiz))
+    pitch = math.degrees(math.atan2(dz, horiz))
     return yaw, pitch
 
 

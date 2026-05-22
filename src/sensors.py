@@ -79,7 +79,7 @@ class CarlaSensor:
 # ---------------------------------------------------------------------------
 # Sensor factories
 # ---------------------------------------------------------------------------
-def _make_camera_blueprint(
+def make_camera_blueprint(
     world: "carla.World",
     sensor_type: str,
     width: int,
@@ -129,7 +129,7 @@ def spawn_attached_camera(
     registry: ActorRegistry,
 ) -> CarlaSensor:
     """Spawn a camera attached to ``parent`` (e.g. the UGV)."""
-    bp = _make_camera_blueprint(world, sensor_type, width, height, fov)
+    bp = make_camera_blueprint(world, sensor_type, width, height, fov)
     actor = world.spawn_actor(bp, transform, attach_to=parent)
     registry.register(actor)
     return CarlaSensor(
@@ -149,7 +149,7 @@ def spawn_static_camera(
     registry: ActorRegistry,
 ) -> CarlaSensor:
     """Spawn a static (world-anchored) camera, e.g. a relay surveillance cam."""
-    bp = _make_camera_blueprint(world, sensor_type, width, height, fov)
+    bp = make_camera_blueprint(world, sensor_type, width, height, fov)
     actor = world.spawn_actor(bp, transform)
     registry.register(actor)
     return CarlaSensor(
