@@ -15,14 +15,16 @@
 # Scene semantics (the point of this run):
 #   - Per-relay theming: each relay anchors a distinct semantic district so
 #     the dataset *union* covers a wide class palette while each individual
-#     image stays balanced (8-12 distinguishable classes per frame).
-#         relay_01 NW   — coffee shop / bakery scene   (street furniture)
-#         relay_02 N    — busy plaza (cars + cyclists + ad pillars)
-#         relay_03 NE   — gas station / convenience    (kiosk + barriers)
-#         relay_04 SW   — park / green corridor        (trees + benches)
-#         relay_05 SE   — market / vendor stalls       (advertisement + bicycle)
-#         relay_06 E    — residential parking          (parked sedans + trash)
-#         relay_07 W    — construction / maintenance   (barriers + warehouse)
+#     image stays balanced (10-14 distinguishable classes per frame).
+#         relay_01 NW   — coffee shop / bakery + city bike rack
+#         relay_02 N    — busy plaza + mixed two-wheeler rack (bike+scooter+motorcycle)
+#         relay_03 NE   — gas station / convenience + courier bike rack
+#         relay_04 SW   — park / green corridor + mountain bike rack
+#         relay_05 SE   — market / vendor stalls + e-bike vendor cluster
+#         relay_06 E    — residential parking + resident bike rack
+#         relay_07 W    — construction / maintenance + worker bike rack
+#     Every relay has 2-4 two-wheelers (bicycle / scooter / motorcycle)
+#     parked along the curb — a new semantic class group not present in L1.
 #   - moving_npc_vehicles 12 -> 22, npc_vehicle_filters expanded to 12 brands
 #     for visual diversity.
 #   - walkers 20 -> 40  (more pedestrian semantic anchors)
@@ -197,7 +199,7 @@ scene:
     per_relay:
       # ------------------------------------------------------------------ #
       # relay_01 NW — café / bakery district
-      # categories: kiosk, bench, trashcan, tree, signage, bicycle, sedan
+      # categories: kiosk, bench, trashcan, tree, signage, bike rack (3 bikes)
       # ------------------------------------------------------------------ #
       relay_01:
         ring_radius_m: 6.0
@@ -211,11 +213,14 @@ scene:
           - {blueprint: static.prop.trashcan02, count: 1}
           - {blueprint: static.prop.aporosatree, count: 1}
           - {blueprint: static.prop.advertisement, count: 1}
+          # bike rack — 3 bicycles parked in a row
           - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
 
       # ------------------------------------------------------------------ #
       # relay_02 N — busy plaza
-      # categories: ad pillar, cypress tree, scooter, bicycle, bench, sport car
+      # categories: ad pillar, cypress tree, bench, trashcan,
+      #             mixed two-wheeler rack (bikes + scooter + motorcycle)
       # ------------------------------------------------------------------ #
       relay_02:
         ring_radius_m: 6.0
@@ -226,14 +231,18 @@ scene:
         props:
           - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.cypresstree, count: 1}
-          - {blueprint: vehicle.vespa.zx125, count: 1}
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
           - {blueprint: static.prop.bench01, count: 1}
           - {blueprint: static.prop.trashcan04, count: 1}
+          # mixed two-wheeler rack — 2 bicycles + scooter + motorcycle
+          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: vehicle.vespa.zx125, count: 1}
+          - {blueprint: vehicle.kawasaki.ninja, count: 1}
 
       # ------------------------------------------------------------------ #
       # relay_03 NE — gas station / convenience
-      # categories: kiosk, barrier, signage, trashcan, tree, taxi-style sedan
+      # categories: kiosk, barriers, signage, trashcan, tree,
+      #             courier bike rack (delivery bicycles + scooter)
       # ------------------------------------------------------------------ #
       relay_03:
         ring_radius_m: 6.0
@@ -247,10 +256,13 @@ scene:
           - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.trashcan03, count: 1}
           - {blueprint: static.prop.aporosatree, count: 1}
+          # courier bike rack — 2 delivery bicycles + 1 scooter
+          - {blueprint: vehicle.diamondback.century, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 1}
 
       # ------------------------------------------------------------------ #
-      # relay_04 SW — park / green corridor (semantic emphasis: vegetation)
-      # categories: 2x trees, 2x benches, trashcan, bicycle
+      # relay_04 SW — park / green corridor (vegetation + recreation bikes)
+      # categories: 2x trees, 2x benches, trashcan, mountain bike rack
       # ------------------------------------------------------------------ #
       relay_04:
         ring_radius_m: 7.0
@@ -263,11 +275,14 @@ scene:
           - {blueprint: static.prop.bench01, count: 1}
           - {blueprint: static.prop.bench02, count: 1}
           - {blueprint: static.prop.trashcan01, count: 1}
+          # mountain bike rack — 3 sport bicycles
+          - {blueprint: vehicle.bh.crossbike, count: 1}
           - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: vehicle.gazelle.omafiets, count: 1}
 
       # ------------------------------------------------------------------ #
       # relay_05 SE — open-air market / vendor row
-      # categories: ads + scooter + tree + barrier + bicycle + suv
+      # categories: ads + tree + barrier + vendor scooter cluster (e-bikes)
       # ------------------------------------------------------------------ #
       relay_05:
         ring_radius_m: 6.0
@@ -277,15 +292,16 @@ scene:
           - vehicle.lincoln.mkz_2017
         props:
           - {blueprint: static.prop.advertisement, count: 2}
-          - {blueprint: vehicle.vespa.zx125, count: 1}
           - {blueprint: static.prop.cypresstree, count: 1}
           - {blueprint: static.prop.streetbarrier, count: 1}
+          # vendor scooter / e-bike cluster — 4 two-wheelers
+          - {blueprint: vehicle.vespa.zx125, count: 2}
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.diamondback.century, count: 1}
 
       # ------------------------------------------------------------------ #
       # relay_06 E — residential parking lane
-      # categories: 3 parked sedans + trashcan + bench + tree
-      # (heavier vehicle theme — tests how matching handles repeated cars)
+      # categories: 3 parked sedans + trashcan + bench + tree + 2 resident bikes
       # ------------------------------------------------------------------ #
       relay_06:
         ring_radius_m: 6.0
@@ -299,10 +315,13 @@ scene:
           - {blueprint: static.prop.bench01, count: 1}
           - {blueprint: static.prop.aporosatree, count: 1}
           - {blueprint: static.prop.advertisement, count: 1}
+          # resident bike rack — 2 bicycles
+          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.diamondback.century, count: 1}
 
       # ------------------------------------------------------------------ #
       # relay_07 W — construction / maintenance
-      # categories: barriers (heavy), kiosk, trashcan, bicycle, light sedan
+      # categories: 3 barriers + kiosk + trashcan + 2 worker bikes
       # ------------------------------------------------------------------ #
       relay_07:
         ring_radius_m: 6.0
@@ -313,7 +332,9 @@ scene:
           - {blueprint: static.prop.streetbarrier, count: 3}
           - {blueprint: static.prop.kiosk_01, count: 1}
           - {blueprint: static.prop.trashcan04, count: 1}
+          # worker bike rack — 2 utility bicycles
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.bh.crossbike, count: 1}
 
       default:
         static_vehicles: 0
