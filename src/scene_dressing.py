@@ -203,6 +203,10 @@ def _normalize_xy(vec: Tuple[float, float]) -> Optional[Tuple[float, float]]:
     return x / norm, y / norm
 
 
+def _neg_xy(vec: Tuple[float, float]) -> Tuple[float, float]:
+    return -vec[0], -vec[1]
+
+
 def _min_dist2_to_path(
     path_points: List[Tuple[float, float]],
     query_xy: Tuple[float, float],
@@ -271,24 +275,23 @@ def _dress_one_relay(
     cx, cy, cz = look_at
     rx, ry, _rz = relay_location
     toward_dir = (rx - cx, ry - cy)
-    bike_dir = _normalize_xy(toward_dir) or (0.0, 1.0)
-    outward_dir = None
-    if loop_center_xy is not None:
-        outward_dir = _normalize_xy((cx - loop_center_xy[0], cy - loop_center_xy[1]))
+    relay_side_dir = _normalize_xy(toward_dir) or (0.0, 1.0)
     tangent = _nearest_path_tangent(ugv_path or [], (cx, cy))
     if tangent is not None:
-        tx, ty = tangent
+        _tx, ty = tangent
+        tx = tangent[0]
         nx, ny = -ty, tx
-        if outward_dir is not None and nx * outward_dir[0] + ny * outward_dir[1] < 0.0:
+        if nx * toward_dir[0] + ny * toward_dir[1] < 0.0:
             nx, ny = -nx, -ny
-        elif outward_dir is None and nx * toward_dir[0] + ny * toward_dir[1] < 0.0:
-            nx, ny = -nx, -ny
-        outward_dir = (nx, ny)
-    if outward_dir is None:
-        outward_dir = bike_dir
-    if bike_dir[0] * outward_dir[0] + bike_dir[1] * outward_dir[1] < 0.25:
-        bike_dir = outward_dir
+        relay_side_dir = (nx, ny)
+    curb_side_dir = relay_side_dir
+
     away_offset = float(density_cfg.get("ring_radius_m", 5.0))
+    bike_offset = float(density_cfg.get("bike_offset_m", 4.0))
+    bike_sidewalk_margin = float(density_cfg.get("bike_sidewalk_margin_m", 0.8))
+    relay_side_clearance = toward_dir[0] * relay_side_dir[0] + toward_dir[1] * relay_side_dir[1]
+    if relay_side_clearance > bike_sidewalk_margin + 0.5:
+        bike_offset = max(0.5, relay_side_clearance - bike_sidewalk_margin)
 
     vehicles_before = len(result.static_vehicles)
     n_veh = int(density_cfg.get("static_vehicles", 0))
@@ -299,7 +302,7 @@ def _dress_one_relay(
     ) or []
     if n_veh > 0 and veh_bps:
         positions = _far_sidewalk_positions(
-            (cx, cy), outward_dir, away_offset, n_veh, z=max(cz + 0.2, 0.2),
+            (cx, cy), curb_side_dir, away_offset, n_veh, z=max(cz + 0.2, 0.2),
         )
         for (x, y, z, yaw) in positions:
             bp_id = rng.choice(veh_bps)
@@ -324,7 +327,6 @@ def _dress_one_relay(
 
     far_specs  = [s for s in prop_specs if not _is_bike(s.get("blueprint", ""))]
     near_specs = [s for s in prop_specs if     _is_bike(s.get("blueprint", ""))]
-    bike_offset  = float(density_cfg.get("bike_offset_m", 4.0))
     bike_spacing = float(density_cfg.get("bike_spacing_m", 1.5))
 
     n_bikes_requested = sum(int(p.get("count", 0)) for p in near_specs)
@@ -352,7 +354,7 @@ def _dress_one_relay(
     if far_specs:
         far_offset = away_offset + 2.5
         positions = _far_sidewalk_positions(
-            (cx, cy), outward_dir, far_offset, n_props_requested,
+            (cx, cy), curb_side_dir, far_offset, n_props_requested,
             z=max(cz + 0.1, 0.1), yaw_offset_deg=rng.uniform(0.0, 30.0),
         )
         far_spawned = _spawn_from_positions(far_specs, positions)
@@ -360,7 +362,7 @@ def _dress_one_relay(
     bike_spawned = 0
     if near_specs:
         positions = _bike_rack_positions(
-            (cx, cy), bike_dir, bike_offset, n_bikes_requested,
+            (cx, cy), relay_side_dir, bike_offset, n_bikes_requested,
             spacing_m=bike_spacing, z=max(cz + 0.1, 0.1),
         )
         bike_spawned = _spawn_from_positions(near_specs, positions)

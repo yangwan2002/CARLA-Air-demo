@@ -130,9 +130,11 @@ trajectory:
         - [-30.0, 24.6]
         - [-0.76, 24.6]
 
-# 7 relays distributed across both loop straights:
-#   * left/start street (upper lane): relay_01 .. relay_04, all biased eastbound
-#   * right/return street (lower lane): relay_05 .. relay_07, all biased westbound
+# 7 relays distributed across both straight segments of the UGV loop:
+#   * UGV spawn / front-view boulevard (the street shown in the forward image):
+#       relay_01 .. relay_04, all biased eastbound
+#   * post-turn return carriageway:
+#       relay_05 .. relay_07, all biased westbound
 relay_cameras:
   default_resolution: [1920, 1080]
   default_fov: 90.0
