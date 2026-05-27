@@ -76,10 +76,25 @@ def _spawn_static_actor(
     if actor is None:
         # Try a few small jitters before giving up — tight street curbs are
         # often partially blocked.
-        for dx, dy in [(0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5),
-                       (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]:
+        for dx, dy, dz in [
+            (0.0, 0.0, -0.25),
+            (0.0, 0.0, 0.25),
+            (0.5, 0.0, 0.0),
+            (-0.5, 0.0, 0.0),
+            (0.0, 0.5, 0.0),
+            (0.0, -0.5, 0.0),
+            (0.5, 0.0, -0.15),
+            (-0.5, 0.0, -0.15),
+            (0.0, 0.5, -0.15),
+            (0.0, -0.5, -0.15),
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+        ]:
             tf.location.x = float(x) + dx
             tf.location.y = float(y) + dy
+            tf.location.z = float(z) + dz
             actor = world.try_spawn_actor(bp, tf)
             if actor is not None:
                 break
@@ -207,6 +222,38 @@ def _neg_xy(vec: Tuple[float, float]) -> Tuple[float, float]:
     return -vec[0], -vec[1]
 
 
+def _ground_z_near(
+    world: "carla.World",
+    x: float,
+    y: float,
+    fallback_z: float,
+    lift: float = 0.05,
+) -> float:
+    """Project an XY point to the nearest map-supported surface height."""
+    if carla is None:
+        return float(fallback_z)
+
+    world_map = world.get_map()
+    lane_type = getattr(getattr(carla, "LaneType", None), "Any", None)
+    probe_zs = [fallback_z, 0.0, 0.2, -0.5, 1.0]
+    for probe_z in probe_zs:
+        try:
+            loc = carla.Location(x=float(x), y=float(y), z=float(probe_z))
+            if lane_type is not None:
+                waypoint = world_map.get_waypoint(
+                    loc,
+                    project_to_road=True,
+                    lane_type=lane_type,
+                )
+            else:
+                waypoint = world_map.get_waypoint(loc, project_to_road=True)
+        except Exception:
+            continue
+        if waypoint is not None:
+            return float(waypoint.transform.location.z + lift)
+    return float(fallback_z)
+
+
 def _min_dist2_to_path(
     path_points: List[Tuple[float, float]],
     query_xy: Tuple[float, float],
@@ -305,8 +352,9 @@ def _dress_one_relay(
             (cx, cy), curb_side_dir, away_offset, n_veh, z=max(cz + 0.2, 0.2),
         )
         for (x, y, z, yaw) in positions:
+            grounded_z = _ground_z_near(world, x, y, z, lift=0.05)
             bp_id = rng.choice(veh_bps)
-            actor = _spawn_static_actor(world, bp_id, x, y, z, yaw, registry,
+            actor = _spawn_static_actor(world, bp_id, x, y, grounded_z, yaw, registry,
                                         role_name=f"static_veh_{relay_name}")
             if actor is not None:
                 result.static_vehicles.append(actor)
@@ -343,8 +391,23 @@ def _dress_one_relay(
             for _ in range(count):
                 x, y, z, yaw = positions[idx]
                 idx += 1
-                actor = _spawn_static_actor(world, bp_id, x, y, z, yaw, registry,
-                                            role_name=f"prop_{relay_name}")
+                grounded_z = _ground_z_near(
+                    world,
+                    x,
+                    y,
+                    z,
+                    lift=0.05 if bp_id.startswith("vehicle.") else 0.03,
+                )
+                actor = _spawn_static_actor(
+                    world,
+                    bp_id,
+                    x,
+                    y,
+                    grounded_z,
+                    yaw,
+                    registry,
+                    role_name=f"prop_{relay_name}",
+                )
                 if actor is not None:
                     result.static_props.append(actor)
                     n += 1
