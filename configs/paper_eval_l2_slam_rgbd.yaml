@@ -23,10 +23,10 @@
 #   L2 (this file)              — geom HARD,   semantics RICH       (sweet spot)
 #   L3 (paper_eval_l3*.yaml)    — geom HARD,   semantics POOR       (limit test)
 #
-# Vs L1, only three things change at the scene level — everything else
-# (camera intrinsics, ring path, relay layout, static-car palette, kiosk /
-# bench / trashcan / advertisement / streetbarrier usage) is identical so
-# numbers stay comparable head-to-head:
+# Vs L1, the semantic enrichments below still define L2, but the relay layout
+# is also rebalanced so relay/UGV overlap is distributed more uniformly around
+# the loop. Camera intrinsics, ring path, and the broader scene-dressing
+# palette stay aligned with L1 so the head-to-head comparison remains legible:
 #
 #   1) Each relay adds 2-3 *parked* two-wheelers (bicycle / scooter / moto)
 #      arranged in a neat rack on the relay-side sidewalk. CARLA bike
@@ -51,7 +51,7 @@
 #     the local UGV travel direction, so relay/UGV overlap is no longer
 #     dominated by 90 deg side views.
 #   - relay sites are spread across both the left/start street and the
-#     right/return street instead of collapsing onto one side of the loop.
+#     right/return street with a 3-on-blue / 4-on-yellow split.
 #   - bike_offset_m 4.0 -> 4.5 to leave a 0.5 m margin against the UGV's
 #     stop_radius_m=4.0, so a parked bike never trips TM's safety radius.
 #   - moving NPCs / walkers are kept away from the full UGV loop corridor,
@@ -146,9 +146,10 @@ trajectory:
         - [-0.76, 24.6]
 
 # 7 relays split across the two opposite streets around the block:
-#   * blue-side street in the user's markup: relay_01 .. relay_04
-#   * yellow-side street in the user's markup: relay_05 .. relay_07
-#   * no relay is placed on the turn sectors or on the road centerline
+#   * blue-side street in the user's markup: relay_01 .. relay_03
+#   * yellow-side street in the user's markup: relay_04 .. relay_07
+#   * headings stay biased along the local UGV travel direction so relay/UGV
+#     overlap stays forward-looking instead of collapsing into side views
 relay_cameras:
   default_resolution: [1920, 1080]
   default_fov: 90.0
@@ -161,38 +162,38 @@ relay_cameras:
       fov: 90.0
       use_depth: true
     - name: relay_02
-      location: [-24.0, 30.6, 10.0]
-      look_at: [0.0, 24.6, 0.4]
+      location: [-16.0, 30.6, 10.0]
+      look_at: [8.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_03
-      location: [8.0, 30.6, 10.0]
-      look_at: [32.0, 24.6, 0.4]
-      resolution: [1920, 1080]
-      fov: 90.0
-      use_depth: true
-    - name: relay_04
-      location: [28.0, 30.6, 10.0]
+      location: [24.0, 30.6, 10.0]
       look_at: [48.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
-    - name: relay_05
+    - name: relay_04
       location: [48.0, 10.6, 10.0]
       look_at: [32.0, 16.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
-    - name: relay_06
+    - name: relay_05
       location: [16.0, 10.6, 10.0]
       look_at: [0.0, 16.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
-    - name: relay_07
+    - name: relay_06
       location: [-16.0, 10.6, 10.0]
       look_at: [-32.0, 16.6, 0.4]
+      resolution: [1920, 1080]
+      fov: 90.0
+      use_depth: true
+    - name: relay_07
+      location: [-36.0, 10.6, 10.0]
+      look_at: [-52.0, 16.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
