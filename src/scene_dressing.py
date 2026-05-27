@@ -67,8 +67,11 @@ def _spawn_static_actor(
         if recommended:
             bp.set_attribute("color", random.choice(recommended))
 
+    ground_z = float(z)
+    is_vehicle = bp_id.startswith("vehicle.")
+    spawn_z = ground_z + (0.6 if is_vehicle else 0.05)
     tf = carla.Transform(
-        carla.Location(x=float(x), y=float(y), z=float(z)),
+        carla.Location(x=float(x), y=float(y), z=spawn_z),
         carla.Rotation(roll=0.0, pitch=0.0, yaw=float(yaw_deg)),
     )
 
@@ -94,13 +97,24 @@ def _spawn_static_actor(
         ]:
             tf.location.x = float(x) + dx
             tf.location.y = float(y) + dy
-            tf.location.z = float(z) + dz
+            tf.location.z = spawn_z + dz
             actor = world.try_spawn_actor(bp, tf)
             if actor is not None:
                 break
     if actor is None:
         LOGGER.debug("Could not spawn %s near (%.1f, %.1f) after jitters.", bp_id, x, y)
         return None
+
+    try:
+        rest_z = ground_z + 0.03
+        if is_vehicle and hasattr(actor, "bounding_box"):
+            rest_z = ground_z + max(float(actor.bounding_box.extent.z), 0.05) + 0.03
+        tf.location.x = float(x)
+        tf.location.y = float(y)
+        tf.location.z = rest_z
+        actor.set_transform(tf)
+    except Exception:
+        pass
 
     if hasattr(actor, "set_simulate_physics"):
         try:
@@ -227,11 +241,29 @@ def _ground_z_near(
     x: float,
     y: float,
     fallback_z: float,
-    lift: float = 0.05,
+    lift: float = 0.0,
 ) -> float:
     """Project an XY point to the nearest map-supported surface height."""
     if carla is None:
         return float(fallback_z)
+
+    try:
+        hits = world.cast_ray(
+            carla.Location(x=float(x), y=float(y), z=50.0),
+            carla.Location(x=float(x), y=float(y), z=-10.0),
+        )
+        if hits:
+            preferred_hits = [
+                hit for hit in hits
+                if any(
+                    token in str(hit.label)
+                    for token in ("Road", "Sidewalk", "Terrain", "Ground")
+                )
+            ]
+            ground_hit = min(preferred_hits or hits, key=lambda hit: hit.location.z)
+            return float(ground_hit.location.z + lift)
+    except Exception:
+        pass
 
     world_map = world.get_map()
     lane_type = getattr(getattr(carla, "LaneType", None), "Any", None)
