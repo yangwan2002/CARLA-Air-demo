@@ -130,55 +130,54 @@ trajectory:
         - [-30.0, 24.6]
         - [-0.76, 24.6]
 
-# 7 relays distributed across both straight segments of the UGV loop:
-#   * UGV spawn / front-view boulevard (the street shown in the forward image):
-#       relay_01 .. relay_04, all biased eastbound
-#   * post-turn return carriageway:
-#       relay_05 .. relay_07, all biased westbound
+# 7 relays distributed around the full UGV loop:
+#   * front-view boulevard: relay_01, relay_07
+#   * southeast / southwest turn sectors: relay_02, relay_06
+#   * return carriageway: relay_03, relay_04, relay_05
 relay_cameras:
   default_resolution: [1920, 1080]
   default_fov: 90.0
   default_use_depth: true
   cameras:
     - name: relay_01
-      location: [-64.0, 30.6, 10.0]
-      look_at: [-48.0, 24.6, 0.4]
+      location: [20.0, 30.6, 10.0]
+      look_at: [36.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_02
-      location: [-32.0, 30.6, 10.0]
-      look_at: [-16.0, 24.6, 0.4]
+      location: [66.5, 31.6, 10.0]
+      look_at: [54.0, 20.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_03
-      location: [4.0, 30.6, 10.0]
-      look_at: [20.0, 24.6, 0.4]
+      location: [48.0, 10.6, 10.0]
+      look_at: [32.0, 16.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_04
-      location: [32.0, 30.6, 10.0]
-      look_at: [48.0, 24.6, 0.4]
-      resolution: [1920, 1080]
-      fov: 90.0
-      use_depth: true
-    - name: relay_05
-      location: [56.0, 10.6, 10.0]
-      look_at: [40.0, 16.6, 0.4]
-      resolution: [1920, 1080]
-      fov: 90.0
-      use_depth: true
-    - name: relay_06
       location: [16.0, 10.6, 10.0]
       look_at: [0.0, 16.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
+    - name: relay_05
+      location: [-16.0, 10.6, 10.0]
+      look_at: [-32.0, 16.6, 0.4]
+      resolution: [1920, 1080]
+      fov: 90.0
+      use_depth: true
+    - name: relay_06
+      location: [-66.5, 8.4, 10.0]
+      look_at: [-54.0, 20.0, 0.4]
+      resolution: [1920, 1080]
+      fov: 90.0
+      use_depth: true
     - name: relay_07
-      location: [-24.0, 10.6, 10.0]
-      look_at: [-40.0, 16.6, 0.4]
+      location: [-48.0, 30.6, 10.0]
+      look_at: [-32.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
