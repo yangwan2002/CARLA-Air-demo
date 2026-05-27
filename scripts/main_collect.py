@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -170,6 +171,20 @@ def main() -> int:
         relay_camera_specs=relay_cfg["cameras"],
         jsonl_filename=save_cfg.get("jsonl_filename", "frames.jsonl"),
     )
+    overwrite_existing = bool(sim_cfg.get("overwrite_existing_sequence", False))
+    if paths.root.exists():
+        existing_entries = list(paths.root.iterdir())
+        if existing_entries:
+            if overwrite_existing:
+                shutil.rmtree(paths.root)
+            else:
+                print(
+                    "Refusing to reuse existing non-empty sequence directory: "
+                    f"{paths.root}. Change simulation.sequence_name or set "
+                    "simulation.overwrite_existing_sequence=true to replace it.",
+                    file=sys.stderr,
+                )
+                return 3
     paths.ensure()
 
     log_file = paths.root / "collect.log"
