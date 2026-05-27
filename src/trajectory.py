@@ -281,6 +281,8 @@ class UgvController:
 
         self.target_speed_mps = float(ugv_cfg.get("speed_mps", 5.0))
         self.speed_diff_pct = float(ugv_cfg.get("tm_speed_difference_pct", 30.0))
+        self.ignore_vehicles_pct = float(ugv_cfg.get("tm_ignore_vehicles_pct", 0.0))
+        self.ignore_walkers_pct = float(ugv_cfg.get("tm_ignore_walkers_pct", 0.0))
         # How close (metres) to the last waypoint before we brake to a stop.
         self._stop_radius = float(ugv_cfg.get("stop_radius_m", 8.0))
         self.loop_mode = bool(ugv_cfg.get("loop_mode", False))
@@ -304,13 +306,20 @@ class UgvController:
             self.vehicle.set_autopilot(True, port)
             self.tm.ignore_lights_percentage(self.vehicle, 100.0)
             self.tm.ignore_signs_percentage(self.vehicle, 100.0)
+            if self.ignore_vehicles_pct > 0.0 and hasattr(self.tm, "ignore_vehicles_percentage"):
+                self.tm.ignore_vehicles_percentage(self.vehicle, self.ignore_vehicles_pct)
+            if self.ignore_walkers_pct > 0.0 and hasattr(self.tm, "ignore_walkers_percentage"):
+                self.tm.ignore_walkers_percentage(self.vehicle, self.ignore_walkers_pct)
             self.tm.vehicle_percentage_speed_difference(self.vehicle, self.speed_diff_pct)
             self.tm.auto_lane_change(self.vehicle, False)
         except Exception as e:  # pragma: no cover
             LOGGER.warning("UGV TM setup failed: %s", e)
         self.step(0.0)
-        LOGGER.info("UGV controller: autopilot ON, TM port=%d, slowdown=%.1f%%.",
-                    port, self.speed_diff_pct)
+        LOGGER.info(
+            "UGV controller: autopilot ON, TM port=%d, slowdown=%.1f%%, "
+            "ignore_vehicles=%.1f%%, ignore_walkers=%.1f%%.",
+            port, self.speed_diff_pct, self.ignore_vehicles_pct, self.ignore_walkers_pct,
+        )
 
     def step(self, sim_time: float) -> None:
         """Push the active phase's route; brake once we reach the phase endpoint."""

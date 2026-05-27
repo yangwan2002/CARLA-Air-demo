@@ -195,6 +195,45 @@ def _nearest_path_tangent(
     return best_tangent
 
 
+def _normalize_xy(vec: Tuple[float, float]) -> Optional[Tuple[float, float]]:
+    x, y = vec
+    norm = math.hypot(x, y)
+    if norm <= 1e-9:
+        return None
+    return x / norm, y / norm
+
+
+def _min_dist2_to_path(
+    path_points: List[Tuple[float, float]],
+    query_xy: Tuple[float, float],
+) -> float:
+    """Squared distance from a 2D point to the nearest segment of a polyline."""
+    if not path_points:
+        return float("inf")
+    if len(path_points) == 1:
+        dx = query_xy[0] - path_points[0][0]
+        dy = query_xy[1] - path_points[0][1]
+        return dx * dx + dy * dy
+
+    qx, qy = query_xy
+    best_dist2 = float("inf")
+    for (ax, ay), (bx, by) in zip(path_points, path_points[1:]):
+        vx, vy = bx - ax, by - ay
+        seg_len2 = vx * vx + vy * vy
+        if seg_len2 <= 1e-9:
+            dx = qx - ax
+            dy = qy - ay
+            best_dist2 = min(best_dist2, dx * dx + dy * dy)
+            continue
+        wx, wy = qx - ax, qy - ay
+        u = max(0.0, min(1.0, (wx * vx + wy * vy) / seg_len2))
+        px, py = ax + u * vx, ay + u * vy
+        dx = qx - px
+        dy = qy - py
+        best_dist2 = min(best_dist2, dx * dx + dy * dy)
+    return best_dist2
+
+
 # ------------------------------------------------------------------------ #
 # Per-relay dressing
 # ------------------------------------------------------------------------ #
@@ -217,6 +256,7 @@ def _dress_one_relay(
     rng: random.Random,
     result: DressingResult,
     ugv_path: Optional[List[Tuple[float, float]]] = None,
+    loop_center_xy: Optional[Tuple[float, float]] = None,
 ) -> None:
     """Place static cars + props around a relay without intruding into the lane.
 
@@ -231,15 +271,23 @@ def _dress_one_relay(
     cx, cy, cz = look_at
     rx, ry, _rz = relay_location
     toward_dir = (rx - cx, ry - cy)
-    away_dir = (-toward_dir[0], -toward_dir[1])
+    bike_dir = _normalize_xy(toward_dir) or (0.0, 1.0)
+    outward_dir = None
+    if loop_center_xy is not None:
+        outward_dir = _normalize_xy((cx - loop_center_xy[0], cy - loop_center_xy[1]))
     tangent = _nearest_path_tangent(ugv_path or [], (cx, cy))
     if tangent is not None:
         tx, ty = tangent
         nx, ny = -ty, tx
-        if nx * toward_dir[0] + ny * toward_dir[1] < 0.0:
+        if outward_dir is not None and nx * outward_dir[0] + ny * outward_dir[1] < 0.0:
             nx, ny = -nx, -ny
-        toward_dir = (nx, ny)
-        away_dir = (-nx, -ny)
+        elif outward_dir is None and nx * toward_dir[0] + ny * toward_dir[1] < 0.0:
+            nx, ny = -nx, -ny
+        outward_dir = (nx, ny)
+    if outward_dir is None:
+        outward_dir = bike_dir
+    if bike_dir[0] * outward_dir[0] + bike_dir[1] * outward_dir[1] < 0.25:
+        bike_dir = outward_dir
     away_offset = float(density_cfg.get("ring_radius_m", 5.0))
 
     vehicles_before = len(result.static_vehicles)
@@ -250,7 +298,9 @@ def _dress_one_relay(
          "vehicle.nissan.micra", "vehicle.mini.cooper_s", "vehicle.toyota.prius"],
     ) or []
     if n_veh > 0 and veh_bps:
-        positions = _far_sidewalk_positions((cx, cy), away_dir, away_offset, n_veh, z=cz - 1.0)
+        positions = _far_sidewalk_positions(
+            (cx, cy), outward_dir, away_offset, n_veh, z=max(cz + 0.2, 0.2),
+        )
         for (x, y, z, yaw) in positions:
             bp_id = rng.choice(veh_bps)
             actor = _spawn_static_actor(world, bp_id, x, y, z, yaw, registry,
@@ -302,16 +352,16 @@ def _dress_one_relay(
     if far_specs:
         far_offset = away_offset + 2.5
         positions = _far_sidewalk_positions(
-            (cx, cy), away_dir, far_offset, n_props_requested,
-            z=cz - 1.5, yaw_offset_deg=rng.uniform(0.0, 30.0),
+            (cx, cy), outward_dir, far_offset, n_props_requested,
+            z=max(cz + 0.1, 0.1), yaw_offset_deg=rng.uniform(0.0, 30.0),
         )
         far_spawned = _spawn_from_positions(far_specs, positions)
 
     bike_spawned = 0
     if near_specs:
         positions = _bike_rack_positions(
-            (cx, cy), toward_dir, bike_offset, n_bikes_requested,
-            spacing_m=bike_spacing, z=cz + 0.1,
+            (cx, cy), bike_dir, bike_offset, n_bikes_requested,
+            spacing_m=bike_spacing, z=max(cz + 0.1, 0.1),
         )
         bike_spawned = _spawn_from_positions(near_specs, positions)
 
@@ -336,6 +386,8 @@ def _spawn_npc_vehicles(
     result: DressingResult,
     ugv_xy: Optional[Tuple[float, float]] = None,
     keepout_radius_m: float = 15.0,
+    ugv_path: Optional[List[Tuple[float, float]]] = None,
+    route_keepout_radius_m: float = 0.0,
 ) -> None:
     if count <= 0 or carla is None:
         return
@@ -360,6 +412,17 @@ def _spawn_npc_vehicles(
         LOGGER.info(
             "NPC keepout: dropped %d / %d spawn points within %.1f m of UGV (%.2f, %.2f).",
             before - len(spawn_points), before, keepout_radius_m, ux, uy,
+        )
+    if ugv_path and route_keepout_radius_m > 0:
+        r2 = route_keepout_radius_m * route_keepout_radius_m
+        before = len(spawn_points)
+        spawn_points = [
+            sp for sp in spawn_points
+            if _min_dist2_to_path(ugv_path, (sp.location.x, sp.location.y)) > r2
+        ]
+        LOGGER.info(
+            "NPC route keepout: dropped %d / %d spawn points within %.1f m of UGV path.",
+            before - len(spawn_points), before, route_keepout_radius_m,
         )
     rng.shuffle(spawn_points)
 
@@ -393,6 +456,9 @@ def _spawn_walkers(
     registry: ActorRegistry,
     rng: random.Random,
     result: DressingResult,
+    ugv_path: Optional[List[Tuple[float, float]]] = None,
+    keepout_radius_m: float = 0.0,
+    target_keepout_radius_m: Optional[float] = None,
 ) -> None:
     if count <= 0 or carla is None:
         return
@@ -403,10 +469,21 @@ def _spawn_walkers(
         LOGGER.warning("No walker blueprints; skipping pedestrians.")
         return
 
+    def _sample_nav_location(route_keepout_m: float) -> Optional["carla.Location"]:
+        for _ in range(12):
+            loc = world.get_random_location_from_navigation()
+            if loc is None:
+                continue
+            if ugv_path and route_keepout_m > 0:
+                if _min_dist2_to_path(ugv_path, (loc.x, loc.y)) <= route_keepout_m * route_keepout_m:
+                    continue
+            return loc
+        return None
+
     # Find spawn points on the navigation mesh.
     targets: List["carla.Location"] = []
     for _ in range(count * 4):  # over-sample, navigation may return None
-        loc = world.get_random_location_from_navigation()
+        loc = _sample_nav_location(keepout_radius_m)
         if loc is not None:
             targets.append(loc)
         if len(targets) >= count:
@@ -437,7 +514,8 @@ def _spawn_walkers(
         result.walker_controllers.append(ctrl)
         try:
             ctrl.start()
-            target = world.get_random_location_from_navigation()
+            keepout_m = target_keepout_radius_m if target_keepout_radius_m is not None else keepout_radius_m
+            target = _sample_nav_location(keepout_m)
             if target is not None:
                 ctrl.go_to_location(target)
             ctrl.set_max_speed(1.4)  # ~normal walking
@@ -477,6 +555,11 @@ def dress_scene(
 
     per_relay = scene_cfg.get("per_relay", {}) or {}
     default_density = per_relay.get("default", {}) or {}
+    loop_center_xy: Optional[Tuple[float, float]] = None
+    if ugv_path:
+        xs = [p[0] for p in ugv_path]
+        ys = [p[1] for p in ugv_path]
+        loop_center_xy = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
     for spec in relay_specs:
         name = spec["name"]
         look_at = spec.get("look_at", [0.0, 0.0, 1.5])
@@ -489,6 +572,7 @@ def dress_scene(
             (float(look_at[0]), float(look_at[1]), float(look_at[2])),
             (float(relay_loc[0]), float(relay_loc[1]), float(relay_loc[2])),
             density, registry, rng, result, ugv_path=ugv_path,
+            loop_center_xy=loop_center_xy,
         )
 
     _spawn_npc_vehicles(
@@ -498,11 +582,21 @@ def dress_scene(
         tm, registry, rng, result,
         ugv_xy=ugv_xy,
         keepout_radius_m=float(scene_cfg.get("npc_keepout_radius_m", 15.0)),
+        ugv_path=ugv_path,
+        route_keepout_radius_m=float(scene_cfg.get("npc_route_keepout_radius_m", 0.0)),
     )
     _spawn_walkers(
         world,
         int(scene_cfg.get("walkers", 0)),
         registry, rng, result,
+        ugv_path=ugv_path,
+        keepout_radius_m=float(scene_cfg.get("walker_route_keepout_radius_m", 0.0)),
+        target_keepout_radius_m=float(
+            scene_cfg.get(
+                "walker_target_keepout_radius_m",
+                scene_cfg.get("walker_route_keepout_radius_m", 0.0),
+            )
+        ),
     )
 
     LOGGER.info(
