@@ -146,6 +146,18 @@ def _save_carla_depth(image, dest_npy: Optional[Path], dest_png: Optional[Path],
         save_depth_png_viz(dest_png, depth_m, max_m=max_m)
 
 
+def _resolve_sequence_name(sim_cfg: Dict[str, Any]) -> str:
+    """Return the final sequence name, optionally appending a timestamp."""
+    base_name = str(sim_cfg.get("sequence_name", "seq_001")).strip() or "seq_001"
+    if not bool(sim_cfg.get("auto_sequence_name_timestamp", False)):
+        return base_name
+
+    ts_format = str(sim_cfg.get("sequence_name_timestamp_format", "%Y%m%d_%H%M%S"))
+    timestamp = time.strftime(ts_format, time.localtime())
+    prefix = base_name.rstrip("_")
+    return f"{prefix}_{timestamp}" if prefix else timestamp
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -160,11 +172,16 @@ def main() -> int:
     save_cfg = cfg["save"]
     scene_cfg = cfg.get("scene", {}).get("dressing", {}) or {}
     traj_cfg = cfg.get("trajectory", {}) or {}
+    base_sequence_name = str(sim_cfg.get("sequence_name", "seq_001")).strip() or "seq_001"
+    effective_sequence_name = _resolve_sequence_name(sim_cfg)
+    if effective_sequence_name != base_sequence_name:
+        sim_cfg["sequence_name_base"] = base_sequence_name
+    sim_cfg["sequence_name"] = effective_sequence_name
 
     # ---- paths -----------------------------------------------------------
     paths = SequencePaths.build(
         output_dir=sim_cfg["output_dir"],
-        sequence_name=sim_cfg.get("sequence_name", "seq_001"),
+        sequence_name=effective_sequence_name,
         ugv_sensor_mode=ugv_cfg["sensor_mode"],
         ugv_capture_depth_stereo=bool(ugv_cfg["camera"].get("stereo_capture_depth", False)),
         uav_camera_flags=uav_cfg.get("cameras", {}) or {},
@@ -191,6 +208,11 @@ def main() -> int:
     setup_logging(getattr(logging, args.log_level.upper()), log_file=log_file)
     LOGGER.info("Loaded config from %s", args.config)
     LOGGER.info("Sequence root: %s", paths.root)
+    if effective_sequence_name != base_sequence_name:
+        LOGGER.info(
+            "Resolved sequence_name: base=%s -> effective=%s",
+            base_sequence_name, effective_sequence_name,
+        )
 
     dump_config(cfg, paths.dataset_root / "dataset_config.yaml")
     dump_config(cfg, paths.root / "config_snapshot.yaml")

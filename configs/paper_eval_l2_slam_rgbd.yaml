@@ -69,6 +69,8 @@ simulation:
   duration_seconds: 105
   output_dir: /root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim
   sequence_name: paper_eval_l2_slam_rgbd
+  auto_sequence_name_timestamp: true
+  sequence_name_timestamp_format: "%Y%m%d_%H%M%S"
   seed: 2024
   weather:
     cloudiness: 10.0
