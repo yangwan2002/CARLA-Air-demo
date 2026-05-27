@@ -1,4 +1,21 @@
 # =============================================================================
+# L2-SLAM-RGBD — same scene as L2 (paper_eval_l2_sem_rich), but with depth PNGs
+# enabled and frame rate doubled, so ORB-SLAM2 RGBD can ingest it directly.
+#
+# Diff vs paper_eval_l2_sem_rich.yaml:
+#   - simulation.save_hz   5  -> 10   (UGV frame-pair displacement 1.6m -> 0.8m)
+#   - simulation.sequence_name -> paper_eval_l2_slam_rgbd (separate output dir)
+#   - save.save_depth_png  false -> true  (enables 16-bit depth PNGs for UGV,
+#     UAV, and all 7 relay cameras)
+#
+# Everything else is identical: scene dressing, NPC count, weather, UAV
+# altitude/pitch, relay layout, ring path, calibration, TM params.
+#
+# Expected dataset size: ~30-40 GB total (1050 frames per camera x 9 RGB +
+# 9 depth streams; depth 16-bit PNG compresses well).
+# =============================================================================
+
+# =============================================================================
 # L2 — geometrically harder than L1, with a *modest* semantic enrichment.
 # =============================================================================
 # Ablation regime per the paper plan:
@@ -30,8 +47,6 @@
 # are directly comparable to L1.
 #
 # Bug fixes folded in here:
-#   - save_hz restored to 10 so the effective dataset cadence matches the
-#     older paper run.
 #   - relay headings are redistributed around the full ring and biased along
 #     the local UGV travel direction, so relay/UGV overlap is no longer
 #     dominated by 90 deg side views.
@@ -49,7 +64,7 @@ simulation:
   save_hz: 10
   duration_seconds: 105
   output_dir: /root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim
-  sequence_name: paper_eval_l2_sem_rich
+  sequence_name: paper_eval_l2_slam_rgbd
   seed: 2024
   weather:
     cloudiness: 10.0
@@ -362,7 +377,7 @@ scene:
 save:
   image_format: png
   save_depth_npy: false
-  save_depth_png: false
+  save_depth_png: true
   depth_png_max_m: 80.0
   save_frames_jsonl: true
   save_pose_csv: true

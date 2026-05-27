@@ -96,6 +96,37 @@ def _spawn_static_actor(
     return actor
 
 
+def _bike_rack_positions(
+    center: Tuple[float, float],
+    toward_dir: Tuple[float, float],
+    offset_m: float,
+    count: int,
+    spacing_m: float = 1.5,
+    z: float = 0.05,
+) -> List[Tuple[float, float, float, float]]:
+    """Place a row of bicycles on the NEAR sidewalk like a parking rack.
+
+    All bikes share the same yaw (perpendicular to the street, pointing
+    toward the lane) and are spaced ``spacing_m`` apart along the street,
+    centered on ``center + offset_m * toward_dir``.
+    """
+    import math as _m
+    out: List[Tuple[float, float, float, float]] = []
+    cx, cy = center
+    ax, ay = toward_dir
+    norm = _m.hypot(ax, ay) or 1.0
+    ax, ay = ax / norm, ay / norm
+    px, py = -ay, ax  # along-street axis
+    # Uniform yaw: bikes face the lane (i.e. opposite of toward_dir).
+    yaw = _m.degrees(_m.atan2(-ay, -ax))
+    for i in range(count):
+        s = (i - (count - 1) / 2.0) * spacing_m
+        x = cx + ax * offset_m + px * s
+        y = cy + ay * offset_m + py * s
+        out.append((x, y, z, yaw))
+    return out
+
+
 def _far_sidewalk_positions(
     center: Tuple[float, float],
     away_dir: Tuple[float, float],
@@ -115,7 +146,8 @@ def _far_sidewalk_positions(
     far sidewalk.
 
     The "along-street" axis is the direction perpendicular to ``away_dir``;
-    we spread actors evenly along it.
+    when ``away_dir`` is the lane normal, this naturally becomes the local
+    lane tangent.
     """
     import math as _m
     out: List[Tuple[float, float, float, float]] = []
@@ -136,49 +168,31 @@ def _far_sidewalk_positions(
     return out
 
 
-def _sidewalk_positions(
-    center: Tuple[float, float],
-    offset_y_m: float,
-    count: int,
-    z: float = 0.05,
-    yaw_offset_deg: float = 0.0,
-) -> List[Tuple[float, float, float, float]]:
-    """Place actors on the SIDEWALK either side of an east/west street.
+def _nearest_path_tangent(
+    path_points: List[Tuple[float, float]],
+    query_xy: Tuple[float, float],
+) -> Optional[Tuple[float, float]]:
+    """Return the unit tangent of the path segment nearest to ``query_xy``."""
+    if len(path_points) < 2:
+        return None
 
-    The y=13/17 streets in Town10HD run along the x axis, so sidewalks are
-    parallel lines at y = look_at_y ± offset_y_m. We alternate sides and
-    spread along x. Yaw points along the street so vehicles look parked.
-    """
-    out: List[Tuple[float, float, float, float]] = []
-    cx, cy = center
-    for i in range(count):
-        side = -1 if (i % 2 == 0) else +1
-        # Distribute along x, +/- 6 m around the relay center
-        dx = ((i // 2) - max(count // 4, 1) * 0.5) * 4.0
-        x = cx + dx
-        y = cy + side * offset_y_m
-        yaw = 0.0 + (180.0 if side > 0 else 0.0) + yaw_offset_deg
-        out.append((x, y, z, yaw))
-    return out
-
-
-def _ring_positions(
-    center: Tuple[float, float],
-    radius: float,
-    count: int,
-    z: float = 0.05,
-    yaw_offset_deg: float = 0.0,
-) -> List[Tuple[float, float, float, float]]:
-    """Evenly spaced positions around a circle. Returns (x, y, z, yaw)."""
-    out: List[Tuple[float, float, float, float]] = []
-    cx, cy = center
-    for i in range(count):
-        theta = 2.0 * math.pi * (i / max(count, 1))
-        x = cx + radius * math.cos(theta)
-        y = cy + radius * math.sin(theta)
-        yaw = math.degrees(theta) + 90.0 + yaw_offset_deg  # tangent to the ring
-        out.append((x, y, z, yaw))
-    return out
+    qx, qy = query_xy
+    best_dist2 = float("inf")
+    best_tangent: Optional[Tuple[float, float]] = None
+    for (ax, ay), (bx, by) in zip(path_points, path_points[1:]):
+        vx, vy = bx - ax, by - ay
+        seg_len2 = vx * vx + vy * vy
+        if seg_len2 <= 1e-9:
+            continue
+        wx, wy = qx - ax, qy - ay
+        u = max(0.0, min(1.0, (wx * vx + wy * vy) / seg_len2))
+        px, py = ax + u * vx, ay + u * vy
+        dist2 = (qx - px) ** 2 + (qy - py) ** 2
+        if dist2 < best_dist2:
+            seg_len = math.sqrt(seg_len2)
+            best_dist2 = dist2
+            best_tangent = (vx / seg_len, vy / seg_len)
+    return best_tangent
 
 
 # ------------------------------------------------------------------------ #
@@ -202,22 +216,33 @@ def _dress_one_relay(
     registry: ActorRegistry,
     rng: random.Random,
     result: DressingResult,
+    ugv_path: Optional[List[Tuple[float, float]]] = None,
 ) -> None:
-    """Place static cars + props on the FAR sidewalk relative to the relay.
+    """Place static cars + props around a relay without intruding into the lane.
 
     density_cfg keys:
         static_vehicles: int
         static_vehicle_blueprints: list[str]
         props: list[{blueprint, count}]
-        ring_radius_m: float — used as the far-sidewalk offset distance
+        ring_radius_m: float — far-sidewalk offset for static vehicles / props
+        bike_offset_m: float — near-sidewalk offset for two-wheeler vehicles
+        bike_spacing_m: float — gap between adjacent bikes in the rack
     """
     cx, cy, cz = look_at
     rx, ry, _rz = relay_location
-    # Unit vector from relay to look_at, then keep going to land on the far
-    # sidewalk.
-    ax, ay = cx - rx, cy - ry
+    toward_dir = (rx - cx, ry - cy)
+    away_dir = (-toward_dir[0], -toward_dir[1])
+    tangent = _nearest_path_tangent(ugv_path or [], (cx, cy))
+    if tangent is not None:
+        tx, ty = tangent
+        nx, ny = -ty, tx
+        if nx * toward_dir[0] + ny * toward_dir[1] < 0.0:
+            nx, ny = -nx, -ny
+        toward_dir = (nx, ny)
+        away_dir = (-nx, -ny)
     away_offset = float(density_cfg.get("ring_radius_m", 5.0))
 
+    vehicles_before = len(result.static_vehicles)
     n_veh = int(density_cfg.get("static_vehicles", 0))
     veh_bps = density_cfg.get(
         "static_vehicle_blueprints",
@@ -225,28 +250,40 @@ def _dress_one_relay(
          "vehicle.nissan.micra", "vehicle.mini.cooper_s", "vehicle.toyota.prius"],
     ) or []
     if n_veh > 0 and veh_bps:
-        # Park static vehicles on the FAR sidewalk (across the lane from the
-        # relay), so they appear behind/beside the lane in the relay image.
-        positions = _far_sidewalk_positions((cx, cy), (ax, ay), away_offset, n_veh, z=cz - 1.0)
+        positions = _far_sidewalk_positions((cx, cy), away_dir, away_offset, n_veh, z=cz - 1.0)
         for (x, y, z, yaw) in positions:
             bp_id = rng.choice(veh_bps)
             actor = _spawn_static_actor(world, bp_id, x, y, z, yaw, registry,
                                         role_name=f"static_veh_{relay_name}")
             if actor is not None:
                 result.static_vehicles.append(actor)
+    vehicles_spawned = len(result.static_vehicles) - vehicles_before
 
-    # Props: same far-sidewalk distribution, slightly farther out so they
-    # don't overlap the static vehicles.
+    # Props: split by type.
+    #   * Two-wheeler vehicle blueprints (bike/scooter/moto) -> NEAR sidewalk
+    #     in a tidy bike rack (uniform yaw, tight spacing).
+    #   * Everything else (static.prop.*) -> FAR sidewalk.
     prop_specs = density_cfg.get("props", []) or []
-    prop_offset = away_offset + 2.5
-    total_props = sum(int(p.get("count", 0)) for p in prop_specs)
-    if total_props > 0:
-        positions = _far_sidewalk_positions(
-            (cx, cy), (ax, ay), prop_offset, total_props,
-            z=cz - 1.5, yaw_offset_deg=rng.uniform(0.0, 30.0),
-        )
+    bike_prefixes = (
+        "vehicle.diamondback.", "vehicle.gazelle.", "vehicle.vespa.",
+        "vehicle.kawasaki.", "vehicle.bh.", "vehicle.harley-davidson.",
+        "vehicle.yamaha.",
+    )
+    def _is_bike(bp_id: str) -> bool:
+        return any(bp_id.startswith(p) for p in bike_prefixes)
+
+    far_specs  = [s for s in prop_specs if not _is_bike(s.get("blueprint", ""))]
+    near_specs = [s for s in prop_specs if     _is_bike(s.get("blueprint", ""))]
+    bike_offset  = float(density_cfg.get("bike_offset_m", 4.0))
+    bike_spacing = float(density_cfg.get("bike_spacing_m", 1.5))
+
+    n_bikes_requested = sum(int(p.get("count", 0)) for p in near_specs)
+    n_props_requested = sum(int(p.get("count", 0)) for p in far_specs)
+
+    def _spawn_from_positions(specs, positions) -> int:
+        n = 0
         idx = 0
-        for spec in prop_specs:
+        for spec in specs:
             bp_id = spec.get("blueprint")
             count = int(spec.get("count", 0))
             if not bp_id or count <= 0:
@@ -258,6 +295,32 @@ def _dress_one_relay(
                                             role_name=f"prop_{relay_name}")
                 if actor is not None:
                     result.static_props.append(actor)
+                    n += 1
+        return n
+
+    far_spawned = 0
+    if far_specs:
+        far_offset = away_offset + 2.5
+        positions = _far_sidewalk_positions(
+            (cx, cy), away_dir, far_offset, n_props_requested,
+            z=cz - 1.5, yaw_offset_deg=rng.uniform(0.0, 30.0),
+        )
+        far_spawned = _spawn_from_positions(far_specs, positions)
+
+    bike_spawned = 0
+    if near_specs:
+        positions = _bike_rack_positions(
+            (cx, cy), toward_dir, bike_offset, n_bikes_requested,
+            spacing_m=bike_spacing, z=cz + 0.1,
+        )
+        bike_spawned = _spawn_from_positions(near_specs, positions)
+
+    LOGGER.info(
+        "Per-relay %s: static_veh=%d/%d, far_props=%d/%d, bikes=%d/%d",
+        relay_name, vehicles_spawned, n_veh,
+        far_spawned, n_props_requested,
+        bike_spawned, n_bikes_requested,
+    )
 
 
 # ------------------------------------------------------------------------ #
@@ -271,6 +334,8 @@ def _spawn_npc_vehicles(
     registry: ActorRegistry,
     rng: random.Random,
     result: DressingResult,
+    ugv_xy: Optional[Tuple[float, float]] = None,
+    keepout_radius_m: float = 15.0,
 ) -> None:
     if count <= 0 or carla is None:
         return
@@ -284,6 +349,18 @@ def _spawn_npc_vehicles(
         return
 
     spawn_points = world.get_map().get_spawn_points()
+    if ugv_xy is not None and keepout_radius_m > 0:
+        ux, uy = ugv_xy
+        r2 = keepout_radius_m * keepout_radius_m
+        before = len(spawn_points)
+        spawn_points = [
+            sp for sp in spawn_points
+            if (sp.location.x - ux) ** 2 + (sp.location.y - uy) ** 2 > r2
+        ]
+        LOGGER.info(
+            "NPC keepout: dropped %d / %d spawn points within %.1f m of UGV (%.2f, %.2f).",
+            before - len(spawn_points), before, keepout_radius_m, ux, uy,
+        )
     rng.shuffle(spawn_points)
 
     spawned = 0
@@ -380,6 +457,8 @@ def dress_scene(
     tm: Optional["carla.TrafficManager"],
     registry: ActorRegistry,
     seed: Optional[int] = None,
+    ugv_xy: Optional[Tuple[float, float]] = None,
+    ugv_path: Optional[List[Tuple[float, float]]] = None,
 ) -> DressingResult:
     """Apply a full ``scene.dressing`` configuration to the world.
 
@@ -409,7 +488,7 @@ def dress_scene(
             world, name,
             (float(look_at[0]), float(look_at[1]), float(look_at[2])),
             (float(relay_loc[0]), float(relay_loc[1]), float(relay_loc[2])),
-            density, registry, rng, result,
+            density, registry, rng, result, ugv_path=ugv_path,
         )
 
     _spawn_npc_vehicles(
@@ -417,6 +496,8 @@ def dress_scene(
         int(scene_cfg.get("moving_npc_vehicles", 0)),
         list(scene_cfg.get("npc_vehicle_filters", ["vehicle.*"])),
         tm, registry, rng, result,
+        ugv_xy=ugv_xy,
+        keepout_radius_m=float(scene_cfg.get("npc_keepout_radius_m", 15.0)),
     )
     _spawn_walkers(
         world,

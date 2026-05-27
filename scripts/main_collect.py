@@ -249,10 +249,20 @@ def main() -> int:
         # Pass duration_seconds down so a config can omit it on the trajectory block.
         traj_cfg.setdefault("duration_seconds", sim_cfg.get("duration_seconds", 60.0))
         coordinator = RelaySweepCoordinator(traj_cfg)
+        dressing_path: List[tuple[float, float]] = []
+        for phase in traj_cfg.get("phases", []) or []:
+            for x, y in phase.get("ugv_path", []) or []:
+                xy = (float(x), float(y))
+                if not dressing_path or dressing_path[-1] != xy:
+                    dressing_path.append(xy)
 
         # ----- spawn UGV ------------------------------------------------
         LOGGER.info("Spawning UGV...")
         ugv_vehicle = spawn_ugv(world, ugv_cfg, registry, seed=seed)
+        # In sync mode, freshly-spawned actors report transform=(0,0,0) until
+        # the next world tick. Tick once so ugv_init_xy below is correct,
+        # otherwise NPC keepout and prop placement use a bogus origin.
+        world.tick()
 
         LOGGER.info("Building UGV camera rig (mode=%s)...", ugv_cfg["sensor_mode"])
         ugv_rig = build_ugv_camera_rig(world, ugv_vehicle, ugv_cfg, registry)
@@ -287,6 +297,8 @@ def main() -> int:
             dressing = dress_scene(
                 world, scene_cfg, relay_cfg["cameras"],
                 tm=carla_world.tm, registry=registry, seed=seed,
+                ugv_xy=ugv_init_xy,
+                ugv_path=dressing_path,
             )
 
         # ----- controllers ---------------------------------------------
