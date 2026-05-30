@@ -1,0 +1,267 @@
+# Town10HD central boulevard, relay layout v3.
+# Keeps the stable single-lap v2 trajectory, but rebalances the 7 fixed relays
+# around the loop and turns each relay more tangentially to the local UGV
+# travel direction. The goal is to avoid the dominant 90 deg side-view pairs
+# from v2 while preserving the same collection flow.
+simulation:
+  map: Town10HD
+  carla_host: localhost
+  carla_port: 2000
+  synchronous_mode: true
+  fixed_delta_seconds: 0.05
+  simulation_hz: 20
+  save_hz: 5
+  duration_seconds: 105
+  output_dir: /root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim
+  sequence_name: paper_eval_v3
+  seed: 2024
+  weather:
+    cloudiness: 10.0
+    precipitation: 0.0
+    sun_altitude_angle: 70.0
+
+ugv:
+  blueprint: vehicle.tesla.model3
+  role_name: ugv_collector
+  spawn_point_index: 49
+  spawn_xy: null
+  speed_mps: 8.0
+  tm_speed_difference_pct: 45.0
+  stop_radius_m: 4.0
+  loop_mode: true
+  reloop_cooldown_s: 8.0
+  sensor_mode: rgbd
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [1.5, 0.0, 1.6]
+    rotation: [0.0, 0.0, 0.0]
+    stereo_baseline_m: 0.2
+    stereo_capture_depth: false
+
+uav:
+  body_blueprint: vehicle.diamondback.century
+  role_name: uav_collector
+  altitude_m: 35.0
+  spawn_altitude_m: 35.0
+  min_altitude_m: 5.0
+  spawn_xy: [-0.76, 24.6]
+  camera_pitch_deg: -45.0
+  cameras:
+    front_rgb: true
+    front_depth: true
+  camera:
+    resolution: [1280, 720]
+    fov: 90.0
+    location: [0.0, 0.0, -0.3]
+
+trajectory:
+  uav_default_speed_mps: 6.5
+  phases:
+    - name: boulevard_1lap_cw
+      t_start: 0.0
+      t_end: 105.0
+      expected_relay: null
+      # Keep the proven v2 collection flow for now: UAV follows the live UGV
+      # along the full ring, which avoids introducing new TM path-switching
+      # failure modes while we fix the relay geometry first.
+      uav_follow_ugv: true
+      uav_yaw_mode: follow_path
+      uav_path:
+        - [-0.76, 24.6, 35.0]
+      ugv_path:
+        - [20.0, 24.6]
+        - [40.0, 24.6]
+        - [52.0, 24.6]
+        - [55.0, 22.0]
+        - [54.0, 20.0]
+        - [53.0, 18.0]
+        - [52.0, 16.6]
+        - [30.0, 16.6]
+        - [10.0, 16.6]
+        - [-10.0, 16.6]
+        - [-30.0, 16.6]
+        - [-52.0, 16.6]
+        - [-55.0, 18.0]
+        - [-54.0, 20.0]
+        - [-53.0, 22.0]
+        - [-52.0, 24.6]
+        - [-30.0, 24.6]
+        - [-0.76, 24.6]
+
+# Relay layout v3:
+# - relay_01/02/03 cover the north eastbound straight with shallow east-looking
+#   views instead of pure side views.
+# - relay_04 covers the east U-turn descent.
+# - relay_05/06 cover the south westbound straight with west-looking views.
+# - relay_07 covers the west U-turn climb back toward the north lane.
+# The placement is by path responsibility and local heading, not by symmetric
+# pole spacing around the map center.
+relay_cameras:
+  default_resolution: [1280, 720]
+  default_fov: 90.0
+  default_use_depth: true
+  cameras:
+    - name: relay_01             # north-west return straight, looks east-southeast
+      location: [-48.0, 36.0, 10.0]
+      look_at: [-20.0, 24.6, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_02             # north-center straight, looks east-southeast
+      location: [-4.0, 36.0, 10.0]
+      look_at: [20.0, 24.6, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_03             # north-east straight, covers eastbound run-up
+      location: [30.0, 36.0, 10.0]
+      look_at: [55.0, 24.6, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_04             # east U-turn descent, follows the clockwise turn
+      location: [58.0, 30.0, 10.0]
+      look_at: [52.0, 18.5, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_05             # south-east to mid straight, looks west-northwest
+      location: [25.0, 4.0, 10.0]
+      look_at: [-5.0, 16.6, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_06             # south-west straight, looks west-northwest
+      location: [-30.0, 4.0, 10.0]
+      look_at: [-55.0, 16.6, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+    - name: relay_07             # west U-turn climb back onto the north lane
+      location: [-58.0, 10.0, 10.0]
+      look_at: [-54.0, 20.0, 0.4]
+      resolution: [1280, 720]
+      fov: 90.0
+      use_depth: true
+
+scene:
+  dressing:
+    moving_npc_vehicles: 12
+    npc_vehicle_filters:
+      - vehicle.audi.*
+      - vehicle.tesla.*
+      - vehicle.mercedes.*
+      - vehicle.nissan.*
+      - vehicle.toyota.*
+      - vehicle.mini.*
+      - vehicle.bmw.*
+      - vehicle.chevrolet.*
+    walkers: 20
+    per_relay:
+      relay_01:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.toyota.prius
+          - vehicle.audi.a2
+          - vehicle.mini.cooper_s
+        props:
+          - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: static.prop.kiosk_01, count: 1}
+          - {blueprint: static.prop.trashcan02, count: 2}
+          - {blueprint: static.prop.streetbarrier, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
+          - {blueprint: static.prop.bench01, count: 1}
+      relay_02:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.audi.tt
+          - vehicle.mercedes.coupe
+          - vehicle.nissan.micra
+          - vehicle.mini.cooper_s
+        props:
+          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.vespa.zx125, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.trashcan04, count: 2}
+          - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
+      relay_03:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.chevrolet.impala
+          - vehicle.citroen.c3
+          - vehicle.bmw.grandtourer
+        props:
+          - {blueprint: static.prop.bench02, count: 1}
+          - {blueprint: static.prop.trashcan03, count: 2}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.streetbarrier, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
+      relay_04:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.tesla.model3
+          - vehicle.audi.tt
+          - vehicle.nissan.patrol
+        props:
+          - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.trashcan01, count: 2}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
+      relay_05:
+        ring_radius_m: 5.0
+        static_vehicles: 3
+        static_vehicle_blueprints:
+          - vehicle.seat.leon
+          - vehicle.dodge.charger_police
+          - vehicle.lincoln.mkz_2017
+        props:
+          - {blueprint: static.prop.trashcan05, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 1}
+          - {blueprint: static.prop.kiosk_01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.bench02, count: 1}
+      relay_06:
+        ring_radius_m: 5.0
+        static_vehicles: 2
+        static_vehicle_blueprints:
+          - vehicle.jeep.wrangler_rubicon
+          - vehicle.ford.mustang
+        props:
+          - {blueprint: static.prop.streetbarrier, count: 2}
+          - {blueprint: static.prop.trashcan01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
+      relay_07:
+        ring_radius_m: 5.0
+        static_vehicles: 2
+        static_vehicle_blueprints:
+          - vehicle.volkswagen.t2
+          - vehicle.mini.cooper_s
+        props:
+          - {blueprint: static.prop.streetbarrier, count: 2}
+          - {blueprint: static.prop.trashcan04, count: 1}
+          - {blueprint: static.prop.kiosk_01, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
+          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+      default:
+        static_vehicles: 0
+        props: []
+
+save:
+  image_format: png
+  save_depth_npy: false
+  save_depth_png: false
+  depth_png_max_m: 80.0
+  save_frames_jsonl: true
+  save_pose_csv: true
+  save_calibration: true
+  save_trajectory_yaml: true
+  jsonl_filename: frames.jsonl

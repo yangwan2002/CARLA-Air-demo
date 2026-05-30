@@ -10,11 +10,11 @@ HOST = os.environ["SSH_HOST"]
 PORT = int(os.environ["SSH_PORT"])
 USER = os.environ["SSH_USER"]
 PASSWORD = os.environ["SSH_PASSWORD"]
-REMOTE_SEQ = "/root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim/sequences/paper_eval_v2"
+REMOTE_SEQ = "/root/autodl-tmp/CARLA-Air-demo/AirGroundRelay-Sim/sequences/paper_eval_l2_sem_rich"
 LOCAL_OUT = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "samples",
-    "paper_eval_v2_v3_preview_frames",
+    "paper_eval_l2_sem_rich_preview_frames",
 )
 N_FRAMES = 10
 SUBDIRS = ("ugv/front_rgb", "uav/front_rgb")

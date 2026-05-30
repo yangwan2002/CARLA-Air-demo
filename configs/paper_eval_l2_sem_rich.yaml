@@ -23,7 +23,7 @@
 #      foreground. The remaining 4 trees stay in the prop row at the back.
 #
 # Geometry-side changes vs L1 (the geom-HARD half):
-#   - UAV altitude 35 m -> 40 m  (UAV/UGV scale ratio ~1:5 -> ~1:5.7)
+#   - UAV altitude 35 m (same as L1 baseline; pitch -55° for harder cross-view)
 #   - UAV pitch -45° -> -55°     (closer to nadir, harder cross-view match)
 #
 # Same ring path as L1, same 105 s duration => mIoU / center-error numbers
@@ -86,8 +86,8 @@ ugv:
 uav:
   body_blueprint: vehicle.diamondback.century
   role_name: uav_collector
-  altitude_m: 40.0          # L2: +5 m vs L1 (35 m)
-  spawn_altitude_m: 40.0
+  altitude_m: 35.0
+  spawn_altitude_m: 35.0
   min_altitude_m: 5.0
   spawn_xy: [-0.76, 24.6]
   camera_pitch_deg: -55.0   # L2: closer to nadir
@@ -109,76 +109,112 @@ trajectory:
       uav_follow_ugv: true
       uav_yaw_mode: follow_path
       uav_path:
-        - [-0.76, 24.6, 40.0]
+        - [-0.76, 24.6, 35.0]
+      # IMPORTANT: this is the OUTER perimeter loop the TM actually lane-follows
+      # (observed in 155623 run's pose.csv). The previous small inner-loop spec
+      # caused scene_dressing._nearest_path_tangent to pick a far-away segment
+      # for every relay on the outer loop, which inverted the prop-placement
+      # axis and dropped kiosks / streetbarriers / advertisements INTO the
+      # lane (and let npc_route_keepout silently fail). Keep this in sync with
+      # the real TM trajectory.
       ugv_path:
-        - [20.0, 24.6]
+        # leg N (y≈+24.6, UGV +x): x ∈ [-1, 95]
+        - [10.0, 24.6]
         - [40.0, 24.6]
-        - [52.0, 24.6]
-        - [55.0, 22.0]
-        - [54.0, 20.0]
-        - [53.0, 18.0]
-        - [52.0, 16.6]
-        - [30.0, 16.6]
-        - [10.0, 16.6]
-        - [-10.0, 16.6]
-        - [-30.0, 16.6]
-        - [-52.0, 16.6]
-        - [-55.0, 18.0]
-        - [-54.0, 20.0]
-        - [-53.0, 22.0]
-        - [-52.0, 24.6]
+        - [70.0, 24.6]
+        - [95.0, 24.6]
+        # NE corner -> leg E (x≈+106, UGV -y): y ∈ [22, -35]
+        - [104.0, 18.0]
+        - [106.0, 0.0]
+        - [106.0, -20.0]
+        - [106.0, -35.0]
+        # SE corner -> leg S (y≈-64, palm-tree boulevard, UGV -x): x ∈ [95, -30]
+        - [100.0, -55.0]
+        - [85.0, -64.0]
+        - [55.0, -64.0]
+        - [25.0, -64.0]
+        - [-10.0, -64.0]
+        - [-30.0, -64.0]
+        # SW corner -> leg W (x≈-49, UGV +y): y ∈ [-57, +2]
+        - [-46.0, -58.0]
+        - [-49.0, -30.0]
+        - [-49.0, -10.0]
+        - [-49.0, 2.0]
+        # NW corner -> close loop back along leg N
+        - [-45.0, 22.0]
         - [-30.0, 24.6]
         - [-0.76, 24.6]
 
-# 7 relays split across the two opposite streets around the block:
-#   * blue-side street in the user's markup: relay_01 .. relay_03
-#   * yellow-side street in the user's markup: relay_04 .. relay_07
-#   * headings stay biased along the local UGV travel direction so relay/UGV
-#     overlap stays forward-looking instead of collapsing into side views
+# 7 relays placed in UGV-forward-overlap configuration (2-1-3-1 split).
+#
+# Actual UGV trajectory observed from the 155623 run pose.csv shows the
+# TM lane-follows the OUTER perimeter of one big city block, NOT the
+# small back-and-forth implied by ugv_path waypoints:
+#
+#   leg N (north,  y≈+24.6, UGV  +x): x ∈ [-1, 95]   (t ≈  0 – 17 s)
+#   leg E (east,   x≈+106,  UGV  -y): y ∈ [22, -35]  (t ≈ 18 – 28 s)
+#   leg S (south,  y≈-64,   UGV  -x): x ∈ [95, -30]  (t ≈ 36 – 52 s) ★ palm-tree street
+#   leg W (west,   x≈-49,   UGV  +y): y ∈ [-57, +2]  (t ≈ 54 – 105 s)
+#
+# Each relay is placed off-road, ~10 m above the curb, looking in the
+# SAME direction the UGV moves on its leg so the relay's forward cone
+# overlaps the UGV front camera's forward cone.
+#
+# Distribution requested by user (2-1-3-1):
+#   * 2 relays on leg N
+#   * 1 relay  on leg E
+#   * 3 relays on leg S (palm-tree street — primary focus)
+#   * 1 relay  on leg W
 relay_cameras:
   default_resolution: [1920, 1080]
   default_fov: 90.0
   default_use_depth: true
   cameras:
+    # ----- Leg N (y=24.6, UGV +x) — 2 relays, all looking +x
     - name: relay_01
-      location: [-56.0, 30.6, 10.0]
-      look_at: [-32.0, 24.6, 0.4]
+      location: [-10.0, 30.6, 10.0]
+      look_at: [25.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_02
-      location: [-16.0, 30.6, 10.0]
-      look_at: [8.0, 24.6, 0.4]
+      location: [40.0, 30.6, 10.0]
+      look_at: [75.0, 24.6, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
+    # ----- Leg E (x=106, UGV -y) — 1 relay, looking -y
     - name: relay_03
-      location: [24.0, 30.6, 10.0]
-      look_at: [48.0, 24.6, 0.4]
+      location: [112.0, 20.0, 10.0]
+      look_at: [106.0, -15.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
+    # ----- Leg S (y=-64, palm-tree street, UGV -x) — 3 relays, all looking -x
+    # NOTE: y pushed from -60 -> -55 so the relay clears the central median
+    # cypress trees that previously blocked relay_04/06 centre views.
     - name: relay_04
-      location: [48.0, 10.6, 10.0]
-      look_at: [32.0, 16.6, 0.4]
+      location: [80.0, -55.0, 10.0]
+      look_at: [55.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_05
-      location: [16.0, 10.6, 10.0]
-      look_at: [0.0, 16.6, 0.4]
+      location: [50.0, -55.0, 10.0]
+      look_at: [25.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_06
-      location: [-16.0, 10.6, 10.0]
-      look_at: [-32.0, 16.6, 0.4]
+      location: [15.0, -55.0, 10.0]
+      look_at: [-10.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
+    # ----- Leg W (x=-49, UGV +y) — 1 relay, looking +y
     - name: relay_07
-      location: [-36.0, 10.6, 10.0]
-      look_at: [-52.0, 16.6, 0.4]
+      location: [-55.0, -50.0, 10.0]
+      look_at: [-49.0, -20.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
@@ -195,8 +231,11 @@ relay_cameras:
 scene:
   dressing:
     moving_npc_vehicles: 14
-    npc_keepout_radius_m: 18.0
-    npc_route_keepout_radius_m: 12.0
+    # Bumped from 18 / 12 because the 212705 run showed NPCs spawning right
+    # next to the UGV spawn (some on the museum elevated plaza, hence
+    # "floating"). Wider keepout pushes NPCs to lanes the UGV reaches later.
+    npc_keepout_radius_m: 25.0
+    npc_route_keepout_radius_m: 18.0
     npc_vehicle_filters:
       - vehicle.audi.*
       - vehicle.tesla.*
@@ -219,15 +258,35 @@ scene:
 
     # -----------------------------------------------------------------------
     # Geometry note:
-    #   ring_radius_m  — distance from look_at to the FAR-sidewalk (median)
-    #                    where static cars and static.prop.* sit (matches L1).
+    #   ring_radius_m  — distance from look_at to the relay-side sidewalk
+    #                    where static cars and static.prop.* sit. With the
+    #                    fixed outer-loop ugv_path, scene_dressing's
+    #                    _nearest_path_tangent now returns the CORRECT local
+    #                    lane tangent, so this offset is applied perpendicular
+    #                    to the road (off-lane). Pushed 5 -> 8 m to keep big
+    #                    props off the curb-edge entirely.
     #   bike_offset_m  — distance from look_at TOWARD the relay pole where
     #                    two-wheelers sit on the NEAR sidewalk. 4.5 m leaves
     #                    a 0.5 m margin against the UGV's stop_radius_m=4.0.
+    #
+    # Blocking-prop palette (REMOVED across all relays in 212705 follow-up):
+    #   * static.prop.kiosk_01      — ~3 m tall police box, big collider;
+    #                                 ended up in the lane on relay_07.
+    #   * static.prop.streetbarrier — jersey barrier, also lane-blocking.
+    #   * static.prop.advertisement — bus-stop billboard panel; its mesh
+    #                                 hangs over the lane and pinned the UGV
+    #                                 around relay_01 (cause of the t≈12 s
+    #                                 stall in the 212705 run).
+    #   * static.prop.cypresstree   — 4-5 m tree; map already has plenty of
+    #                                 median cypresses, no need to re-spawn.
+    # Semantic richness is now carried by the bike rack + static car palette
+    # + low-profile props (bench / trashcan / mailbox / plantpot / colacan /
+    # streetsign / trafficcone). Total prop COUNT per relay is kept ~equal
+    # so the L2-vs-L1 semantic density comparison stays legible.
     # -----------------------------------------------------------------------
     per_relay:
       relay_01:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 3
         static_vehicle_blueprints:
@@ -235,19 +294,17 @@ scene:
           - vehicle.audi.a2
           - vehicle.mini.cooper_s
         props:
-          # L1 baseline (no tree on this relay so foreground stays clean)
-          - {blueprint: static.prop.kiosk_01, count: 1}
           - {blueprint: static.prop.trashcan02, count: 2}
-          - {blueprint: static.prop.streetbarrier, count: 1}
           - {blueprint: static.prop.bench01, count: 1}
-          # L2 increment: small extra prop
           - {blueprint: static.prop.mailbox, count: 1}
-          # L2 increment: bike rack — 3 bicycles
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.colacan, count: 1}
+          # bike rack — 3 bicycles
           - {blueprint: vehicle.diamondback.century, count: 1}
           - {blueprint: vehicle.gazelle.omafiets, count: 2}
 
       relay_02:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 3
         static_vehicle_blueprints:
@@ -256,20 +313,18 @@ scene:
           - vehicle.nissan.micra
           - vehicle.mini.cooper_s
         props:
-          # L1 baseline (keep cypresstree as backdrop)
-          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.trashcan04, count: 2}
           - {blueprint: static.prop.bench01, count: 1}
-          - {blueprint: static.prop.cypresstree, count: 1}
-          # L2 increment: small extra prop
           - {blueprint: static.prop.streetsign01, count: 1}
-          # L2 increment: mixed two-wheeler rack — bike + scooter + moto
+          - {blueprint: static.prop.plantpot01, count: 1}
+          - {blueprint: static.prop.mailbox, count: 1}
+          # mixed two-wheeler rack — bike + scooter + moto
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
           - {blueprint: vehicle.vespa.zx125, count: 1}
           - {blueprint: vehicle.kawasaki.ninja, count: 1}
 
       relay_03:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 3
         static_vehicle_blueprints:
@@ -277,19 +332,17 @@ scene:
           - vehicle.citroen.c3
           - vehicle.bmw.grandtourer
         props:
-          # L1 baseline minus the tree (drops aporosatree to keep view clear)
           - {blueprint: static.prop.bench02, count: 1}
           - {blueprint: static.prop.trashcan03, count: 2}
-          - {blueprint: static.prop.advertisement, count: 1}
-          - {blueprint: static.prop.streetbarrier, count: 1}
-          # L2 increment: small extra prop
+          - {blueprint: static.prop.streetsign01, count: 1}
           - {blueprint: static.prop.colacan, count: 1}
-          # L2 increment: bike rack — 2 bicycles + scooter
+          - {blueprint: static.prop.mailbox, count: 1}
+          # bike rack — 2 bicycles + scooter
           - {blueprint: vehicle.diamondback.century, count: 2}
           - {blueprint: vehicle.vespa.zx125, count: 1}
 
       relay_04:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 3
         static_vehicle_blueprints:
@@ -297,20 +350,18 @@ scene:
           - vehicle.audi.tt
           - vehicle.nissan.patrol
         props:
-          # L1 baseline (keep cypresstree as backdrop)
           - {blueprint: static.prop.bench01, count: 1}
           - {blueprint: static.prop.trashcan01, count: 2}
-          - {blueprint: static.prop.advertisement, count: 1}
-          - {blueprint: static.prop.cypresstree, count: 1}
-          # L2 increment: small extra prop
           - {blueprint: static.prop.plantpot01, count: 1}
-          # L2 increment: bike rack — 3 bicycles
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.colacan, count: 1}
+          # bike rack — 3 bicycles
           - {blueprint: vehicle.bh.crossbike, count: 1}
           - {blueprint: vehicle.diamondback.century, count: 1}
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
 
       relay_05:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 3
         static_vehicle_blueprints:
@@ -318,54 +369,46 @@ scene:
           - vehicle.dodge.charger_police
           - vehicle.lincoln.mkz_2017
         props:
-          # L1 baseline + a tree (cypresstree backdrop, only relay with 1 tree
-          # added in L2 — relay_05's L1 had no tree; we add one for parity)
           - {blueprint: static.prop.trashcan05, count: 2}
-          - {blueprint: static.prop.kiosk_01, count: 1}
-          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.bench02, count: 1}
-          - {blueprint: static.prop.cypresstree, count: 1}
-          # L2 increment: small extra prop
           - {blueprint: static.prop.plantpot02, count: 1}
-          # L2 increment: bike rack — 2 scooters + bicycle
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.mailbox, count: 1}
+          # bike rack — 2 scooters + bicycle
           - {blueprint: vehicle.vespa.zx125, count: 2}
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
 
       relay_06:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 2
         static_vehicle_blueprints:
           - vehicle.jeep.wrangler_rubicon
           - vehicle.ford.mustang
         props:
-          # L1 baseline (keep cypresstree backdrop)
-          - {blueprint: static.prop.streetbarrier, count: 2}
-          - {blueprint: static.prop.trashcan01, count: 1}
-          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.trashcan01, count: 2}
           - {blueprint: static.prop.bench01, count: 1}
-          - {blueprint: static.prop.cypresstree, count: 1}
-          # L2 increment: small extra prop
           - {blueprint: static.prop.mailbox, count: 1}
-          # L2 increment: bike rack — 2 bicycles
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.colacan, count: 1}
+          # bike rack — 2 bicycles
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
           - {blueprint: vehicle.diamondback.century, count: 1}
 
       relay_07:
-        ring_radius_m: 5.0
+        ring_radius_m: 8.0
         bike_offset_m: 4.5
         static_vehicles: 2
         static_vehicle_blueprints:
           - vehicle.volkswagen.t2
           - vehicle.mini.cooper_s
         props:
-          # L1 baseline minus the tree (drops aporosatree to keep view clear)
-          - {blueprint: static.prop.streetbarrier, count: 2}
-          - {blueprint: static.prop.trashcan04, count: 1}
-          - {blueprint: static.prop.kiosk_01, count: 1}
-          # L2 increment: small extra prop
+          - {blueprint: static.prop.trashcan04, count: 2}
+          - {blueprint: static.prop.bench02, count: 1}
           - {blueprint: static.prop.trafficcone01, count: 1}
-          # L2 increment: bike rack — 2 bicycles
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.mailbox, count: 1}
+          # bike rack — 2 bicycles
           - {blueprint: vehicle.gazelle.omafiets, count: 1}
           - {blueprint: vehicle.bh.crossbike, count: 1}
 

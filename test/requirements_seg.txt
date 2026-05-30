@@ -1,0 +1,6 @@
+# Optional deps for test/run_semantic_seg.py (not needed for data collection)
+torch>=2.0
+torchvision>=0.15
+transformers>=4.30
+pillow>=9.0
+matplotlib>=3.5

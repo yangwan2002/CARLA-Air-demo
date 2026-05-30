@@ -1,4 +1,6 @@
 samples/
+.codex_tmp/
+test/output/
 *.pyc
 __pycache__/
 .venv/
