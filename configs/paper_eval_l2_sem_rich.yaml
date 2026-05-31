@@ -191,23 +191,26 @@ relay_cameras:
       fov: 90.0
       use_depth: true
     # ----- Leg S (y=-64, palm-tree street, UGV -x) — 3 relays, all looking -x
-    # NOTE: y pushed from -60 -> -55 so the relay clears the central median
-    # cypress trees that previously blocked relay_04/06 centre views.
+    # Do NOT use the same (location→look_at) offset for all three — that makes
+    # three parallel copies on a repetitive boulevard look identical.  Split:
+    #   relay_04  north sidewalk, street-level  (eastern segment x≈70–90)
+    #   relay_05  north sidewalk, elevated      (mid segment x≈35–55)
+    #   relay_06  south sidewalk, street-level  (western segment x≈0–25)
     - name: relay_04
-      location: [80.0, -55.0, 10.0]
-      look_at: [55.0, -64.0, 0.4]
+      location: [85.0, -55.0, 10.0]
+      look_at: [72.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_05
-      location: [50.0, -55.0, 10.0]
-      look_at: [25.0, -64.0, 0.4]
+      location: [52.0, -54.0, 13.0]
+      look_at: [38.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
     - name: relay_06
-      location: [15.0, -55.0, 10.0]
-      look_at: [-10.0, -64.0, 0.4]
+      location: [12.0, -72.0, 10.0]
+      look_at: [0.0, -64.0, 0.4]
       resolution: [1920, 1080]
       fov: 90.0
       use_depth: true
@@ -230,12 +233,33 @@ relay_cameras:
 # -----------------------------------------------------------------------------
 scene:
   dressing:
-    moving_npc_vehicles: 14
-    # Bumped from 18 / 12 because the 212705 run showed NPCs spawning right
-    # next to the UGV spawn (some on the museum elevated plaza, hence
-    # "floating"). Wider keepout pushes NPCs to lanes the UGV reaches later.
-    npc_keepout_radius_m: 25.0
-    npc_route_keepout_radius_m: 18.0
+    # L2 semantic target: all dynamic actors live ON the UGV outer-loop corridor
+    # so every relay / UGV camera sees them from t≈0 — not map-wide spawns.
+    # Safety rails (UGV stall / NPC floating):
+    #   * UGV tm_ignore_vehicles/walkers = 100% — applied at spawn + controller
+    #   * npc_path_center_keepout — TM cars prefer adjacent lane, not UGV lane
+    #   * static_route_keepout — parked props stay off lane centerline
+    #   * raycast Z + spawn cull + post-warmup cull — no floating NPCs
+    moving_npc_vehicles: 24
+    walkers: 40
+    npc_keepout_radius_m: 18.0
+    npc_route_spawn_radius_m: 18.0
+    npc_route_spawn_spacing_m: 10.0
+    npc_path_center_keepout_m: 3.5
+    npc_route_keepout_radius_m: 0.0
+    static_route_keepout_radius_m: 7.0
+    walker_route_spawn_radius_m: 16.0
+    walker_route_spawn_spacing_m: 8.0
+    walker_route_keepout_radius_m: 0.0
+    walker_target_route_spawn_radius_m: 16.0
+    walker_spawn_keepout_radius_m: 18.0
+    # NPC spawn: Driving-lane projection + raycast Z. Never set_transform on
+    # autopilot vehicles after spawn (causes physics explosions / flying SUVs).
+    npc_vehicle_lift_m: 0.35
+    npc_spawn_max_z_delta_m: 0.8
+    npc_spawn_max_z_err_m: 0.8
+    static_vehicle_snap_margin_m: 0.02
+    post_dress_warmup_ticks: 8
     npc_vehicle_filters:
       - vehicle.audi.*
       - vehicle.tesla.*
@@ -252,81 +276,63 @@ scene:
       - vehicle.seat.*
       - vehicle.volkswagen.*
       - vehicle.citroen.*
-    walkers: 25
-    walker_route_keepout_radius_m: 10.0
-    walker_target_keepout_radius_m: 10.0
-
     # -----------------------------------------------------------------------
-    # Geometry note:
-    #   ring_radius_m  — distance from look_at to the relay-side sidewalk
-    #                    where static cars and static.prop.* sit. With the
-    #                    fixed outer-loop ugv_path, scene_dressing's
-    #                    _nearest_path_tangent now returns the CORRECT local
-    #                    lane tangent, so this offset is applied perpendicular
-    #                    to the road (off-lane). Pushed 5 -> 8 m to keep big
-    #                    props off the curb-edge entirely.
-    #   bike_offset_m  — distance from look_at TOWARD the relay pole where
-    #                    two-wheelers sit on the NEAR sidewalk. 4.5 m leaves
-    #                    a 0.5 m margin against the UGV's stop_radius_m=4.0.
-    #
-    # Blocking-prop palette (REMOVED across all relays in 212705 follow-up):
-    #   * static.prop.kiosk_01      — ~3 m tall police box, big collider;
-    #                                 ended up in the lane on relay_07.
-    #   * static.prop.streetbarrier — jersey barrier, also lane-blocking.
-    #   * static.prop.advertisement — bus-stop billboard panel; its mesh
-    #                                 hangs over the lane and pinned the UGV
-    #                                 around relay_01 (cause of the t≈12 s
-    #                                 stall in the 212705 run).
-    #   * static.prop.cypresstree   — 4-5 m tree; map already has plenty of
-    #                                 median cypresses, no need to re-spawn.
-    # Semantic richness is now carried by the bike rack + static car palette
-    # + low-profile props (bench / trashcan / mailbox / plantpot / colacan /
-    # streetsign / trafficcone). Total prop COUNT per relay is kept ~equal
-    # so the L2-vs-L1 semantic density comparison stays legible.
+    # Per-relay dressing — L1 palette + L2 bike-rack increment + extra L2
+    # small props (streetsign / plantpot / colacan / trafficcone / aporosatree)
+    # so every relay carries ~9-11 semantic classes in frame.
+    # ugv_path MUST stay on the outer loop; kiosk / streetbarrier still get
+    # +4.5 m extra offset in scene_dressing.py (_BLOCKING_PROP_IDS).
+    # ring_radius 5.5 keeps props closer to the relay FOV than 6.5/8.0.
     # -----------------------------------------------------------------------
     per_relay:
       relay_01:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 3
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.toyota.prius
           - vehicle.audi.a2
           - vehicle.mini.cooper_s
         props:
+          - {blueprint: static.prop.kiosk_01, count: 1}
           - {blueprint: static.prop.trashcan02, count: 2}
+          - {blueprint: static.prop.streetbarrier, count: 1}
           - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
           - {blueprint: static.prop.mailbox, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
-          - {blueprint: static.prop.colacan, count: 1}
-          # bike rack — 3 bicycles
+          - {blueprint: static.prop.trafficcone01, count: 2}
           - {blueprint: vehicle.diamondback.century, count: 1}
           - {blueprint: vehicle.gazelle.omafiets, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 1}
 
       relay_02:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 3
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.audi.tt
           - vehicle.mercedes.coupe
           - vehicle.nissan.micra
           - vehicle.mini.cooper_s
         props:
+          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.trashcan04, count: 2}
           - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
           - {blueprint: static.prop.plantpot01, count: 1}
-          - {blueprint: static.prop.mailbox, count: 1}
-          # mixed two-wheeler rack — bike + scooter + moto
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
-          - {blueprint: vehicle.vespa.zx125, count: 1}
+          - {blueprint: static.prop.colacan, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 2}
           - {blueprint: vehicle.kawasaki.ninja, count: 1}
 
       relay_03:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 3
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.chevrolet.impala
           - vehicle.citroen.c3
@@ -334,17 +340,20 @@ scene:
         props:
           - {blueprint: static.prop.bench02, count: 1}
           - {blueprint: static.prop.trashcan03, count: 2}
-          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.streetbarrier, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
           - {blueprint: static.prop.colacan, count: 1}
-          - {blueprint: static.prop.mailbox, count: 1}
-          # bike rack — 2 bicycles + scooter
+          - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.plantpot02, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
           - {blueprint: vehicle.diamondback.century, count: 2}
-          - {blueprint: vehicle.vespa.zx125, count: 1}
+          - {blueprint: vehicle.vespa.zx125, count: 2}
 
       relay_04:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 3
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.tesla.model3
           - vehicle.audi.tt
@@ -352,65 +361,85 @@ scene:
         props:
           - {blueprint: static.prop.bench01, count: 1}
           - {blueprint: static.prop.trashcan01, count: 2}
+          - {blueprint: static.prop.advertisement, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
           - {blueprint: static.prop.plantpot01, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.mailbox, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
           - {blueprint: static.prop.colacan, count: 1}
-          # bike rack — 3 bicycles
+          - {blueprint: static.prop.plantpot02, count: 1}
           - {blueprint: vehicle.bh.crossbike, count: 1}
-          - {blueprint: vehicle.diamondback.century, count: 1}
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: vehicle.diamondback.century, count: 2}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
 
       relay_05:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 3
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.seat.leon
           - vehicle.dodge.charger_police
           - vehicle.lincoln.mkz_2017
         props:
           - {blueprint: static.prop.trashcan05, count: 2}
+          - {blueprint: static.prop.kiosk_01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.bench02, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
           - {blueprint: static.prop.plantpot02, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
-          - {blueprint: static.prop.mailbox, count: 1}
-          # bike rack — 2 scooters + bicycle
-          - {blueprint: vehicle.vespa.zx125, count: 2}
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: static.prop.colacan, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 3}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
 
       relay_06:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 2
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.jeep.wrangler_rubicon
           - vehicle.ford.mustang
+          - vehicle.chevrolet.impala
         props:
+          - {blueprint: static.prop.streetbarrier, count: 2}
           - {blueprint: static.prop.trashcan01, count: 2}
+          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.bench01, count: 1}
+          - {blueprint: static.prop.cypresstree, count: 1}
           - {blueprint: static.prop.mailbox, count: 1}
+          - {blueprint: static.prop.plantpot01, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
           - {blueprint: static.prop.colacan, count: 1}
-          # bike rack — 2 bicycles
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
-          - {blueprint: vehicle.diamondback.century, count: 1}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
+          - {blueprint: vehicle.diamondback.century, count: 2}
+          - {blueprint: vehicle.vespa.zx125, count: 2}
 
       relay_07:
-        ring_radius_m: 8.0
+        ring_radius_m: 5.5
         bike_offset_m: 4.5
-        static_vehicles: 2
+        static_vehicles: 4
         static_vehicle_blueprints:
           - vehicle.volkswagen.t2
           - vehicle.mini.cooper_s
+          - vehicle.audi.a2
         props:
+          - {blueprint: static.prop.streetbarrier, count: 2}
           - {blueprint: static.prop.trashcan04, count: 2}
+          - {blueprint: static.prop.kiosk_01, count: 1}
+          - {blueprint: static.prop.advertisement, count: 1}
           - {blueprint: static.prop.bench02, count: 1}
+          - {blueprint: static.prop.aporosatree, count: 1}
           - {blueprint: static.prop.trafficcone01, count: 1}
           - {blueprint: static.prop.streetsign01, count: 1}
           - {blueprint: static.prop.mailbox, count: 1}
-          # bike rack — 2 bicycles
-          - {blueprint: vehicle.gazelle.omafiets, count: 1}
+          - {blueprint: static.prop.trafficcone01, count: 2}
+          - {blueprint: static.prop.plantpot01, count: 1}
+          - {blueprint: vehicle.gazelle.omafiets, count: 2}
           - {blueprint: vehicle.bh.crossbike, count: 1}
+          - {blueprint: vehicle.vespa.zx125, count: 2}
 
       default:
         static_vehicles: 0
@@ -418,7 +447,7 @@ scene:
 
 save:
   image_format: png
-  save_depth_npy: false
+  save_depth_npy: true
   save_depth_png: false
   depth_png_max_m: 80.0
   save_frames_jsonl: true

@@ -254,6 +254,37 @@ class RelaySweepCoordinator:
 # --------------------------------------------------------------------------- #
 # UGV controller (waypoint follower driven by the coordinator)
 # --------------------------------------------------------------------------- #
+def apply_ugv_tm_safety(
+    vehicle: "carla.Vehicle",
+    traffic_manager: Optional["carla.TrafficManager"],
+    ugv_cfg: Dict[str, Any],
+) -> None:
+    """Register UGV collision-avoidance policy with the TrafficManager early.
+
+    Call this as soon as the UGV is spawned so TM NPCs cannot block it even
+    during the post-dress warmup ticks (before :class:`UgvController` starts).
+    """
+    if carla is None or traffic_manager is None:
+        return
+    ignore_vehicles_pct = float(ugv_cfg.get("tm_ignore_vehicles_pct", 0.0))
+    ignore_walkers_pct = float(ugv_cfg.get("tm_ignore_walkers_pct", 0.0))
+    try:
+        if hasattr(traffic_manager, "ignore_lights_percentage"):
+            traffic_manager.ignore_lights_percentage(vehicle, 100.0)
+        if hasattr(traffic_manager, "ignore_signs_percentage"):
+            traffic_manager.ignore_signs_percentage(vehicle, 100.0)
+        if ignore_vehicles_pct > 0.0 and hasattr(traffic_manager, "ignore_vehicles_percentage"):
+            traffic_manager.ignore_vehicles_percentage(vehicle, ignore_vehicles_pct)
+        if ignore_walkers_pct > 0.0 and hasattr(traffic_manager, "ignore_walkers_percentage"):
+            traffic_manager.ignore_walkers_percentage(vehicle, ignore_walkers_pct)
+        LOGGER.info(
+            "UGV TM safety: ignore_vehicles=%.1f%%, ignore_walkers=%.1f%%.",
+            ignore_vehicles_pct, ignore_walkers_pct,
+        )
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("UGV TM safety setup failed: %s", exc)
+
+
 class UgvController:
     """Autopilot-driven UGV that follows a per-phase route on the real road graph.
 
@@ -304,12 +335,7 @@ class UgvController:
         port = self.tm.get_port()
         try:
             self.vehicle.set_autopilot(True, port)
-            self.tm.ignore_lights_percentage(self.vehicle, 100.0)
-            self.tm.ignore_signs_percentage(self.vehicle, 100.0)
-            if self.ignore_vehicles_pct > 0.0 and hasattr(self.tm, "ignore_vehicles_percentage"):
-                self.tm.ignore_vehicles_percentage(self.vehicle, self.ignore_vehicles_pct)
-            if self.ignore_walkers_pct > 0.0 and hasattr(self.tm, "ignore_walkers_percentage"):
-                self.tm.ignore_walkers_percentage(self.vehicle, self.ignore_walkers_pct)
+            apply_ugv_tm_safety(self.vehicle, self.tm, self.cfg)
             self.tm.vehicle_percentage_speed_difference(self.vehicle, self.speed_diff_pct)
             self.tm.auto_lane_change(self.vehicle, False)
         except Exception as e:  # pragma: no cover

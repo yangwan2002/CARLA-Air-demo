@@ -232,11 +232,16 @@ def main() -> int:
             pull_latest_image,
         )
         from src.carla_uav import CarlaUav
-        from src.scene_dressing import dress_scene, stop_walker_controllers
+        from src.scene_dressing import (
+            dress_scene,
+            finalize_dressing_after_warmup,
+            stop_walker_controllers,
+        )
         from src.trajectory import (
             RelaySweepCoordinator,
             UgvController,
             CarlaUavController,
+            apply_ugv_tm_safety,
         )
     except ImportError as e:
         LOGGER.error("Required python packages missing: %s", e)
@@ -301,6 +306,9 @@ def main() -> int:
         # otherwise NPC keepout and prop placement use a bogus origin.
         world.tick()
 
+        if carla_world.tm is not None:
+            apply_ugv_tm_safety(ugv_vehicle, carla_world.tm, ugv_cfg)
+
         LOGGER.info("Building UGV camera rig (mode=%s)...", ugv_cfg["sensor_mode"])
         ugv_rig = build_ugv_camera_rig(world, ugv_vehicle, ugv_cfg, registry)
         for s in ugv_rig.sensors.values():
@@ -337,6 +345,18 @@ def main() -> int:
                 ugv_xy=ugv_init_xy,
                 ugv_path=dressing_path,
             )
+            warmup_ticks = int(scene_cfg.get("post_dress_warmup_ticks", 0))
+            if warmup_ticks > 0 and sync_mode:
+                LOGGER.info("Post-dress warmup: %d synchronous ticks...", warmup_ticks)
+                for _ in range(warmup_ticks):
+                    world.tick()
+                culled = finalize_dressing_after_warmup(
+                    world, scene_cfg, dressing, registry,
+                )
+                if culled:
+                    LOGGER.info(
+                        "Post-warmup NPC cull removed %d floating vehicle(s).", culled,
+                    )
 
         # ----- controllers ---------------------------------------------
         ugv_ctrl = UgvController(ugv_vehicle, ugv_cfg, coordinator,

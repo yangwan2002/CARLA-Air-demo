@@ -35,6 +35,13 @@ from .actors import ActorRegistry
 
 LOGGER = logging.getLogger(__name__)
 
+# Props with large colliders — placed further from the lane centre than normal
+# far-sidewalk props (only matters when ugv_path matches the outer loop).
+_BLOCKING_PROP_IDS = frozenset({
+    "static.prop.kiosk_01",
+    "static.prop.streetbarrier",
+})
+
 
 # ------------------------------------------------------------------------ #
 # Static placement helpers
@@ -50,6 +57,7 @@ def _spawn_static_actor(
     x: float, y: float, z: float, yaw_deg: float,
     registry: ActorRegistry,
     role_name: Optional[str] = None,
+    vehicle_snap_margin_m: float = 0.02,
 ) -> Optional["carla.Actor"]:
     """Spawn a single static actor with physics disabled. Returns None on failure."""
     if carla is None:
@@ -67,9 +75,9 @@ def _spawn_static_actor(
         if recommended:
             bp.set_attribute("color", random.choice(recommended))
 
-    ground_z = float(z)
     is_vehicle = bp_id.startswith("vehicle.")
-    spawn_z = ground_z + (0.6 if is_vehicle else 0.05)
+    surf_z = _ground_z_near(world, x, y, float(z), lift=0.0)
+    spawn_z = surf_z + (0.6 if is_vehicle else 0.05)
     tf = carla.Transform(
         carla.Location(x=float(x), y=float(y), z=spawn_z),
         carla.Rotation(roll=0.0, pitch=0.0, yaw=float(yaw_deg)),
@@ -77,8 +85,6 @@ def _spawn_static_actor(
 
     actor = world.try_spawn_actor(bp, tf)
     if actor is None:
-        # Try a few small jitters before giving up — tight street curbs are
-        # often partially blocked.
         for dx, dy, dz in [
             (0.0, 0.0, -0.25),
             (0.0, 0.0, 0.25),
@@ -106,13 +112,15 @@ def _spawn_static_actor(
         return None
 
     try:
-        rest_z = ground_z + 0.03
-        if is_vehicle and hasattr(actor, "bounding_box"):
-            rest_z = ground_z + max(float(actor.bounding_box.extent.z), 0.05) + 0.03
         tf.location.x = float(x)
         tf.location.y = float(y)
-        tf.location.z = rest_z
-        actor.set_transform(tf)
+        if is_vehicle:
+            _snap_static_vehicle(
+                world, actor, surf_z, bp_id=bp_id, margin_m=vehicle_snap_margin_m,
+            )
+        else:
+            tf.location.z = surf_z + 0.03
+            actor.set_transform(tf)
     except Exception:
         pass
 
@@ -286,6 +294,69 @@ def _ground_z_near(
     return float(fallback_z)
 
 
+def _vehicle_half_height(actor: "carla.Actor", bp_id: str = "") -> float:
+    if hasattr(actor, "bounding_box"):
+        half_h = float(actor.bounding_box.extent.z)
+        if half_h > 0.02:
+            return half_h
+    two_wheel = (
+        "vehicle.diamondback.", "vehicle.gazelle.", "vehicle.vespa.",
+        "vehicle.kawasaki.", "vehicle.bh.", "vehicle.yamaha.",
+        "vehicle.harley-davidson.",
+    )
+    if bp_id.startswith(two_wheel):
+        return 0.45
+    return 0.35
+
+
+def _snap_static_vehicle(
+    world: "carla.World",
+    actor: "carla.Actor",
+    surf_z: float,
+    bp_id: str = "",
+    margin_m: float = 0.02,
+) -> None:
+    """Re-seat a physics-off static vehicle onto ``surf_z``."""
+    if carla is None:
+        return
+    try:
+        tf = actor.get_transform()
+        half_h = _vehicle_half_height(actor, bp_id=bp_id)
+        tf.location.z = float(surf_z) + half_h + float(margin_m)
+        actor.set_transform(tf)
+    except Exception as exc:  # pragma: no cover
+        LOGGER.debug("Static vehicle ground snap failed for %s: %s", actor.id, exc)
+
+
+def _reconcile_static_vehicles(
+    world: "carla.World",
+    actors: List["carla.Actor"],
+    margin_m: float = 0.02,
+) -> None:
+    """Post-pass ground snap for physics-off parked vehicles only."""
+    for actor in actors:
+        try:
+            bp_id = actor.type_id if hasattr(actor, "type_id") else ""
+        except Exception:
+            bp_id = ""
+        try:
+            tf = actor.get_transform()
+            surf_z = _ground_z_near(
+                world, tf.location.x, tf.location.y, tf.location.z, lift=0.0,
+            )
+            _snap_static_vehicle(world, actor, surf_z, bp_id=bp_id, margin_m=margin_m)
+        except Exception:
+            pass
+
+
+def _min_dist_to_path(
+    path_points: List[Tuple[float, float]],
+    query_xy: Tuple[float, float],
+) -> float:
+    """Distance from a 2D point to the nearest segment of a polyline."""
+    return math.sqrt(_min_dist2_to_path(path_points, query_xy))
+
+
 def _min_dist2_to_path(
     path_points: List[Tuple[float, float]],
     query_xy: Tuple[float, float],
@@ -317,6 +388,239 @@ def _min_dist2_to_path(
     return best_dist2
 
 
+def _sample_points_along_path(
+    path_points: List[Tuple[float, float]],
+    spacing_m: float,
+) -> List[Tuple[float, float]]:
+    """Return roughly ``spacing_m``-spaced (x, y) samples along a polyline."""
+    if not path_points:
+        return []
+    if len(path_points) == 1 or spacing_m <= 0.0:
+        return list(path_points)
+
+    spacing_m = max(float(spacing_m), 1.0)
+    out: List[Tuple[float, float]] = []
+    for (ax, ay), (bx, by) in zip(path_points, path_points[1:]):
+        vx, vy = bx - ax, by - ay
+        seg_len = math.hypot(vx, vy)
+        if seg_len <= 1e-6:
+            continue
+        n_steps = max(1, int(math.ceil(seg_len / spacing_m)))
+        for i in range(n_steps):
+            t = i / n_steps
+            out.append((ax + t * vx, ay + t * vy))
+    out.append(path_points[-1])
+    return out
+
+
+def _within_ugv_path_corridor(
+    xy: Tuple[float, float],
+    ugv_path: Optional[List[Tuple[float, float]]],
+    radius_m: float,
+) -> bool:
+    if not ugv_path or radius_m <= 0.0:
+        return True
+    return _min_dist_to_path(ugv_path, xy) <= float(radius_m)
+
+
+def _waypoint_dist_to_path(
+    wp: "carla.Waypoint",
+    ugv_path: List[Tuple[float, float]],
+) -> float:
+    loc = wp.transform.location
+    return _min_dist_to_path(ugv_path, (loc.x, loc.y))
+
+
+def _pick_npc_driving_waypoint(
+    wp: "carla.Waypoint",
+    ugv_path: Optional[List[Tuple[float, float]]],
+    path_center_keepout_m: float,
+    rng: random.Random,
+) -> Optional["carla.Waypoint"]:
+    """Pick a Driving lane that keeps TM traffic off the UGV centerline."""
+    if carla is None or wp is None or wp.lane_type != carla.LaneType.Driving:
+        return None
+    if not ugv_path or path_center_keepout_m <= 0.0:
+        return wp
+
+    candidates: List["carla.Waypoint"] = []
+    seen_ids: set = set()
+
+    def _add(w: Optional["carla.Waypoint"]) -> None:
+        if w is None or w.lane_type != carla.LaneType.Driving:
+            return
+        loc = w.transform.location
+        key = (round(loc.x, 1), round(loc.y, 1))
+        if key in seen_ids:
+            return
+        seen_ids.add(key)
+        candidates.append(w)
+
+    _add(wp)
+    for getter in (wp.get_left_lane, wp.get_right_lane):
+        side = getter()
+        _add(side)
+        if side is not None:
+            _add(side.get_left_lane())
+            _add(side.get_right_lane())
+
+    safe = [
+        w for w in candidates
+        if _waypoint_dist_to_path(w, ugv_path) >= float(path_center_keepout_m)
+    ]
+    if safe:
+        return rng.choice(safe)
+    if candidates:
+        return max(candidates, key=lambda w: _waypoint_dist_to_path(w, ugv_path))
+    return None
+
+
+def _route_driving_spawn_transforms(
+    world: "carla.World",
+    ugv_path: List[Tuple[float, float]],
+    spacing_m: float,
+    ugv_xy: Optional[Tuple[float, float]] = None,
+    ugv_keepout_m: float = 0.0,
+    path_center_keepout_m: float = 0.0,
+    rng: Optional[random.Random] = None,
+) -> List["carla.Transform"]:
+    """Build Driving-lane spawn transforms sampled along the UGV polyline."""
+    if carla is None or not ugv_path:
+        return []
+
+    world_map = world.get_map()
+    candidates: List["carla.Transform"] = []
+    seen: set = set()
+    for x, y in _sample_points_along_path(ugv_path, spacing_m):
+        if ugv_xy is not None and ugv_keepout_m > 0.0:
+            ux, uy = ugv_xy
+            dx, dy = x - ux, y - uy
+            if dx * dx + dy * dy <= ugv_keepout_m * ugv_keepout_m:
+                continue
+        try:
+            wp = world_map.get_waypoint(
+                carla.Location(x=float(x), y=float(y), z=0.5),
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+        except Exception:
+            wp = world_map.get_waypoint(
+                carla.Location(x=float(x), y=float(y), z=0.5),
+                project_to_road=True,
+            )
+        if wp is None or wp.lane_type != carla.LaneType.Driving:
+            continue
+        wp = _pick_npc_driving_waypoint(
+            wp, ugv_path, path_center_keepout_m, rng or random.Random(0),
+        )
+        if wp is None:
+            continue
+        loc = wp.transform.location
+        key = (round(loc.x, 0), round(loc.y, 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(wp.transform)
+    return candidates
+
+
+def _sidewalk_locations_along_route(
+    world: "carla.World",
+    ugv_path: List[Tuple[float, float]],
+    spacing_m: float,
+    sidewalk_offset_m: float = 3.8,
+    ugv_xy: Optional[Tuple[float, float]] = None,
+    ugv_keepout_m: float = 0.0,
+) -> List[Tuple[float, float, float]]:
+    """Return sidewalk (x, y, z) samples near the UGV route."""
+    if carla is None or not ugv_path:
+        return []
+
+    world_map = world.get_map()
+    out: List[Tuple[float, float, float]] = []
+    seen: set = set()
+    for x, y in _sample_points_along_path(ugv_path, spacing_m):
+        if ugv_xy is not None and ugv_keepout_m > 0.0:
+            ux, uy = ugv_xy
+            dx, dy = x - ux, y - uy
+            if dx * dx + dy * dy <= ugv_keepout_m * ugv_keepout_m:
+                continue
+        try:
+            wp = world_map.get_waypoint(
+                carla.Location(x=float(x), y=float(y), z=0.5),
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+        except Exception:
+            wp = world_map.get_waypoint(
+                carla.Location(x=float(x), y=float(y), z=0.5),
+                project_to_road=True,
+            )
+        if wp is None:
+            continue
+        yaw_rad = math.radians(float(wp.transform.rotation.yaw))
+        nx, ny = -math.sin(yaw_rad), math.cos(yaw_rad)
+        cx, cy = float(wp.transform.location.x), float(wp.transform.location.y)
+        for sign in (1.0, -1.0):
+            sx = cx + sign * nx * sidewalk_offset_m
+            sy = cy + sign * ny * sidewalk_offset_m
+            key = (round(sx, 0), round(sy, 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            surf_z = _ground_z_near(world, sx, sy, wp.transform.location.z, lift=0.0)
+            out.append((sx, sy, surf_z))
+    return out
+
+
+def _npc_spawn_on_driving_lane(
+    world: "carla.World",
+    sp: "carla.Transform",
+    vehicle_lift_m: float = 0.3,
+    max_catalog_z_delta_m: float = 2.0,
+) -> Optional["carla.Transform"]:
+    """Snap a map spawn point onto a Driving lane with raycast ground Z.
+
+    Town10HD has catalog spawn points on elevated plazas / ramps whose Z does
+    not match the drivable surface below.  Static parked cars already use
+    ``_ground_z_near``; moving NPCs must do the same or a fraction will float.
+    """
+    if carla is None:
+        return sp
+
+    world_map = world.get_map()
+    try:
+        wp = world_map.get_waypoint(
+            sp.location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+    except Exception:
+        wp = world_map.get_waypoint(sp.location, project_to_road=True)
+
+    if wp is None or wp.lane_type != carla.LaneType.Driving:
+        return None
+
+    loc = wp.transform.location
+    lane_z = float(loc.z)
+    if abs(float(sp.location.z) - lane_z) > float(max_catalog_z_delta_m):
+        return None
+
+    surf_z = _ground_z_near(world, float(loc.x), float(loc.y), lane_z, lift=0.0)
+    if abs(surf_z - lane_z) > 0.6:
+        return None
+
+    center_z = surf_z + float(vehicle_lift_m)
+    return carla.Transform(
+        carla.Location(x=float(loc.x), y=float(loc.y), z=center_z),
+        carla.Rotation(
+            roll=float(sp.rotation.roll),
+            pitch=float(sp.rotation.pitch),
+            yaw=float(wp.transform.rotation.yaw),
+        ),
+    )
+
+
 # ------------------------------------------------------------------------ #
 # Per-relay dressing
 # ------------------------------------------------------------------------ #
@@ -327,6 +631,17 @@ class DressingResult:
     npc_vehicles: List["carla.Actor"] = field(default_factory=list)
     walkers: List["carla.Actor"] = field(default_factory=list)
     walker_controllers: List["carla.Actor"] = field(default_factory=list)
+
+
+def _clear_of_ugv_path(
+    xy: Tuple[float, float],
+    ugv_path: Optional[List[Tuple[float, float]]],
+    keepout_m: float,
+) -> bool:
+    """True when ``xy`` is at least ``keepout_m`` away from the UGV polyline."""
+    if not ugv_path or keepout_m <= 0.0:
+        return True
+    return _min_dist_to_path(ugv_path, xy) >= keepout_m
 
 
 def _dress_one_relay(
@@ -340,6 +655,8 @@ def _dress_one_relay(
     result: DressingResult,
     ugv_path: Optional[List[Tuple[float, float]]] = None,
     loop_center_xy: Optional[Tuple[float, float]] = None,
+    vehicle_snap_margin_m: float = 0.02,
+    static_route_keepout_m: float = 0.0,
 ) -> None:
     """Place static cars + props around a relay without intruding into the lane.
 
@@ -381,13 +698,22 @@ def _dress_one_relay(
     ) or []
     if n_veh > 0 and veh_bps:
         positions = _far_sidewalk_positions(
-            (cx, cy), curb_side_dir, away_offset, n_veh, z=max(cz + 0.2, 0.2),
+            (cx, cy), curb_side_dir, away_offset + 2.5, n_veh, z=max(cz + 0.2, 0.2),
         )
         for (x, y, z, yaw) in positions:
-            grounded_z = _ground_z_near(world, x, y, z, lift=0.05)
+            if not _clear_of_ugv_path((x, y), ugv_path, static_route_keepout_m):
+                LOGGER.debug(
+                    "Per-relay %s: skip static veh at (%.1f, %.1f) — UGV path keepout.",
+                    relay_name, x, y,
+                )
+                continue
+            surf_z = _ground_z_near(world, x, y, z, lift=0.0)
             bp_id = rng.choice(veh_bps)
-            actor = _spawn_static_actor(world, bp_id, x, y, grounded_z, yaw, registry,
-                                        role_name=f"static_veh_{relay_name}")
+            actor = _spawn_static_actor(
+                world, bp_id, x, y, surf_z, yaw, registry,
+                role_name=f"static_veh_{relay_name}",
+                vehicle_snap_margin_m=vehicle_snap_margin_m,
+            )
             if actor is not None:
                 result.static_vehicles.append(actor)
     vehicles_spawned = len(result.static_vehicles) - vehicles_before
@@ -421,24 +747,27 @@ def _dress_one_relay(
             if not bp_id or count <= 0:
                 continue
             for _ in range(count):
+                if idx >= len(positions):
+                    break
                 x, y, z, yaw = positions[idx]
                 idx += 1
-                grounded_z = _ground_z_near(
-                    world,
-                    x,
-                    y,
-                    z,
-                    lift=0.05 if bp_id.startswith("vehicle.") else 0.03,
-                )
+                if not _clear_of_ugv_path((x, y), ugv_path, static_route_keepout_m):
+                    LOGGER.debug(
+                        "Per-relay %s: skip prop %s at (%.1f, %.1f) — UGV path keepout.",
+                        relay_name, bp_id, x, y,
+                    )
+                    continue
+                surf_z = _ground_z_near(world, x, y, z, lift=0.0)
                 actor = _spawn_static_actor(
                     world,
                     bp_id,
                     x,
                     y,
-                    grounded_z,
+                    surf_z,
                     yaw,
                     registry,
                     role_name=f"prop_{relay_name}",
+                    vehicle_snap_margin_m=vehicle_snap_margin_m,
                 )
                 if actor is not None:
                     result.static_props.append(actor)
@@ -447,12 +776,26 @@ def _dress_one_relay(
 
     far_spawned = 0
     if far_specs:
-        far_offset = away_offset + 2.5
-        positions = _far_sidewalk_positions(
-            (cx, cy), curb_side_dir, far_offset, n_props_requested,
-            z=max(cz + 0.1, 0.1), yaw_offset_deg=rng.uniform(0.0, 30.0),
-        )
-        far_spawned = _spawn_from_positions(far_specs, positions)
+        normal_specs = [
+            s for s in far_specs if s.get("blueprint") not in _BLOCKING_PROP_IDS
+        ]
+        blocking_specs = [
+            s for s in far_specs if s.get("blueprint") in _BLOCKING_PROP_IDS
+        ]
+        if normal_specs:
+            n_normal = sum(int(p.get("count", 0)) for p in normal_specs)
+            positions = _far_sidewalk_positions(
+                (cx, cy), curb_side_dir, away_offset + 2.5, n_normal,
+                z=max(cz + 0.1, 0.1), yaw_offset_deg=rng.uniform(0.0, 30.0),
+            )
+            far_spawned += _spawn_from_positions(normal_specs, positions)
+        if blocking_specs:
+            n_block = sum(int(p.get("count", 0)) for p in blocking_specs)
+            positions = _far_sidewalk_positions(
+                (cx, cy), curb_side_dir, away_offset + 4.5, n_block,
+                z=max(cz + 0.1, 0.1), yaw_offset_deg=rng.uniform(0.0, 30.0),
+            )
+            far_spawned += _spawn_from_positions(blocking_specs, positions)
 
     bike_spawned = 0
     if near_specs:
@@ -460,6 +803,10 @@ def _dress_one_relay(
             (cx, cy), relay_side_dir, bike_offset, n_bikes_requested,
             spacing_m=bike_spacing, z=max(cz + 0.1, 0.1),
         )
+        positions = [
+            pos for pos in positions
+            if _clear_of_ugv_path((pos[0], pos[1]), ugv_path, static_route_keepout_m)
+        ]
         bike_spawned = _spawn_from_positions(near_specs, positions)
 
     LOGGER.info(
@@ -473,6 +820,79 @@ def _dress_one_relay(
 # ------------------------------------------------------------------------ #
 # Moving NPCs (vehicles + pedestrians)
 # ------------------------------------------------------------------------ #
+def _npc_grounding_ok(
+    world: "carla.World",
+    actor: "carla.Actor",
+    vehicle_lift_m: float,
+    max_z_err_m: float,
+) -> bool:
+    """Return False when an autopilot NPC is clearly floating above the road."""
+    if carla is None:
+        return True
+    try:
+        tf = actor.get_transform()
+        surf_z = _ground_z_near(
+            world, tf.location.x, tf.location.y, tf.location.z, lift=0.0,
+        )
+        expected_z = surf_z + float(vehicle_lift_m)
+        return abs(float(tf.location.z) - expected_z) <= float(max_z_err_m)
+    except Exception:
+        return True
+
+
+def _destroy_npc_actor(
+    actor: "carla.Actor",
+    registry: ActorRegistry,
+    result: DressingResult,
+) -> None:
+    try:
+        actor.set_autopilot(False)
+    except Exception:
+        pass
+    try:
+        if actor in result.npc_vehicles:
+            result.npc_vehicles.remove(actor)
+    except Exception:
+        pass
+    try:
+        if actor in registry._actors:
+            registry._actors.remove(actor)
+    except Exception:
+        pass
+    try:
+        if actor.is_alive:
+            actor.destroy()
+    except Exception:
+        pass
+
+
+def _cull_ungrounded_npcs(
+    world: "carla.World",
+    result: DressingResult,
+    registry: ActorRegistry,
+    vehicle_lift_m: float,
+    max_z_err_m: float,
+) -> int:
+    """Remove floating autopilot NPCs without post-spawn transform snaps."""
+    culled = 0
+    for actor in list(result.npc_vehicles):
+        if _npc_grounding_ok(world, actor, vehicle_lift_m, max_z_err_m):
+            continue
+        try:
+            loc = actor.get_transform().location
+            LOGGER.warning(
+                "Culling ungrounded NPC %s at (%.1f, %.1f, %.1f).",
+                actor.id, loc.x, loc.y, loc.z,
+            )
+        except Exception:
+            LOGGER.warning("Culling ungrounded NPC %s.", actor.id)
+        _destroy_npc_actor(actor, registry, result)
+        culled += 1
+    if culled:
+        LOGGER.info("Removed %d ungrounded moving NPC vehicle(s).", culled)
+    return culled
+
+
 def _spawn_npc_vehicles(
     world: "carla.World",
     count: int,
@@ -484,7 +904,14 @@ def _spawn_npc_vehicles(
     ugv_xy: Optional[Tuple[float, float]] = None,
     keepout_radius_m: float = 15.0,
     ugv_path: Optional[List[Tuple[float, float]]] = None,
+    route_spawn_radius_m: float = 0.0,
+    route_spawn_spacing_m: float = 12.0,
     route_keepout_radius_m: float = 0.0,
+    path_center_keepout_m: float = 0.0,
+    vehicle_lift_m: float = 0.3,
+    max_catalog_z_delta_m: float = 2.0,
+    vehicle_snap_margin_m: float = 0.02,
+    max_spawn_z_err_m: float = 1.2,
 ) -> None:
     if count <= 0 or carla is None:
         return
@@ -510,7 +937,33 @@ def _spawn_npc_vehicles(
             "NPC keepout: dropped %d / %d spawn points within %.1f m of UGV (%.2f, %.2f).",
             before - len(spawn_points), before, keepout_radius_m, ux, uy,
         )
-    if ugv_path and route_keepout_radius_m > 0:
+
+    route_mode = bool(ugv_path and route_spawn_radius_m > 0.0)
+    if route_mode:
+        before = len(spawn_points)
+        spawn_points = [
+            sp for sp in spawn_points
+            if _within_ugv_path_corridor(
+                (sp.location.x, sp.location.y), ugv_path, route_spawn_radius_m,
+            )
+        ]
+        LOGGER.info(
+            "NPC route corridor: kept %d / %d catalog spawn points within %.1f m of UGV path.",
+            len(spawn_points), before, route_spawn_radius_m,
+        )
+        route_tfs = _route_driving_spawn_transforms(
+            world, ugv_path,
+            spacing_m=route_spawn_spacing_m,
+            ugv_xy=ugv_xy,
+            ugv_keepout_m=keepout_radius_m,
+            path_center_keepout_m=path_center_keepout_m,
+            rng=rng,
+        )
+        LOGGER.info(
+            "NPC route corridor: generated %d driving-lane samples along UGV path.",
+            len(route_tfs),
+        )
+    elif ugv_path and route_keepout_radius_m > 0:
         r2 = route_keepout_radius_m * route_keepout_radius_m
         before = len(spawn_points)
         spawn_points = [
@@ -521,12 +974,41 @@ def _spawn_npc_vehicles(
             "NPC route keepout: dropped %d / %d spawn points within %.1f m of UGV path.",
             before - len(spawn_points), before, route_keepout_radius_m,
         )
+        route_tfs = []
+    else:
+        route_tfs = []
+
     rng.shuffle(spawn_points)
 
     spawned = 0
-    for sp in spawn_points:
+    skipped_bad_ground = 0
+
+    def _try_spawn_at_transform(sp_tf: "carla.Transform") -> bool:
+        nonlocal spawned, skipped_bad_ground
         if spawned >= count:
-            break
+            return False
+        if ugv_path and path_center_keepout_m > 0.0:
+            try:
+                wp = world.get_map().get_waypoint(
+                    sp_tf.location,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                )
+            except Exception:
+                wp = world.get_map().get_waypoint(sp_tf.location, project_to_road=True)
+            wp = _pick_npc_driving_waypoint(wp, ugv_path, path_center_keepout_m, rng)
+            if wp is None:
+                skipped_bad_ground += 1
+                return False
+            sp_tf = wp.transform
+        grounded_tf = _npc_spawn_on_driving_lane(
+            world, sp_tf,
+            vehicle_lift_m=vehicle_lift_m,
+            max_catalog_z_delta_m=max_catalog_z_delta_m,
+        )
+        if grounded_tf is None:
+            skipped_bad_ground += 1
+            return False
         bp = rng.choice(candidates)
         if bp.has_attribute("role_name"):
             bp.set_attribute("role_name", f"npc_veh_{spawned:03d}")
@@ -534,16 +1016,57 @@ def _spawn_npc_vehicles(
             recommended = bp.get_attribute("color").recommended_values
             if recommended:
                 bp.set_attribute("color", rng.choice(recommended))
-        actor = world.try_spawn_actor(bp, sp)
+        actor = world.try_spawn_actor(bp, grounded_tf)
         if actor is None:
-            continue
+            return False
+        if not _npc_grounding_ok(world, actor, vehicle_lift_m, max_spawn_z_err_m):
+            try:
+                loc = actor.get_transform().location
+                LOGGER.warning(
+                    "NPC spawn rejected (bad Z) at (%.1f, %.1f, %.1f); destroying.",
+                    loc.x, loc.y, loc.z,
+                )
+            except Exception:
+                LOGGER.warning("NPC spawn rejected (bad Z); destroying.")
+            try:
+                if actor.is_alive:
+                    actor.destroy()
+            except Exception:
+                pass
+            return False
         registry.register(actor)
         result.npc_vehicles.append(actor)
         try:
-            actor.set_autopilot(True, tm.get_port() if tm is not None else 8000)
+            port = tm.get_port() if tm is not None else 8000
+            actor.set_autopilot(True, port)
+            if tm is not None:
+                if hasattr(tm, "ignore_walkers_percentage"):
+                    tm.ignore_walkers_percentage(actor, 100.0)
+                if hasattr(tm, "ignore_vehicles_percentage"):
+                    tm.ignore_vehicles_percentage(actor, 100.0)
+                if hasattr(tm, "distance_to_leading_vehicle"):
+                    tm.distance_to_leading_vehicle(actor, 4.0)
         except Exception as e:  # pragma: no cover
             LOGGER.warning("set_autopilot failed for NPC %s: %s", actor.id, e)
         spawned += 1
+        return True
+
+    if route_mode:
+        rng.shuffle(route_tfs)
+        for sp_tf in route_tfs:
+            if spawned >= count:
+                break
+            _try_spawn_at_transform(sp_tf)
+
+    for sp in spawn_points:
+        if spawned >= count:
+            break
+        _try_spawn_at_transform(sp)
+    if skipped_bad_ground:
+        LOGGER.info(
+            "NPC spawn: skipped %d catalog points (non-driving or elevated Z).",
+            skipped_bad_ground,
+        )
     LOGGER.info("Spawned %d / %d moving NPC vehicles.", spawned, count)
 
 
@@ -554,8 +1077,12 @@ def _spawn_walkers(
     rng: random.Random,
     result: DressingResult,
     ugv_path: Optional[List[Tuple[float, float]]] = None,
-    keepout_radius_m: float = 0.0,
-    target_keepout_radius_m: Optional[float] = None,
+    route_spawn_radius_m: float = 0.0,
+    route_spawn_spacing_m: float = 10.0,
+    route_keepout_radius_m: float = 0.0,
+    target_route_spawn_radius_m: Optional[float] = None,
+    ugv_xy: Optional[Tuple[float, float]] = None,
+    spawn_keepout_radius_m: float = 0.0,
 ) -> None:
     if count <= 0 or carla is None:
         return
@@ -566,35 +1093,71 @@ def _spawn_walkers(
         LOGGER.warning("No walker blueprints; skipping pedestrians.")
         return
 
-    def _sample_nav_location(route_keepout_m: float) -> Optional["carla.Location"]:
-        for _ in range(12):
+    route_mode = bool(ugv_path and route_spawn_radius_m > 0.0)
+    target_radius = (
+        target_route_spawn_radius_m
+        if target_route_spawn_radius_m is not None
+        else route_spawn_radius_m
+    )
+
+    def _sample_nav_location(require_near_route: bool) -> Optional["carla.Location"]:
+        for _ in range(24):
             loc = world.get_random_location_from_navigation()
             if loc is None:
                 continue
-            if ugv_path and route_keepout_m > 0:
-                if _min_dist2_to_path(ugv_path, (loc.x, loc.y)) <= route_keepout_m * route_keepout_m:
+            if ugv_xy is not None and spawn_keepout_radius_m > 0:
+                ux, uy = ugv_xy
+                dx = loc.x - ux
+                dy = loc.y - uy
+                if dx * dx + dy * dy <= spawn_keepout_radius_m * spawn_keepout_radius_m:
+                    continue
+            if ugv_path and require_near_route and route_spawn_radius_m > 0:
+                if not _within_ugv_path_corridor(
+                    (loc.x, loc.y), ugv_path, route_spawn_radius_m,
+                ):
+                    continue
+            elif ugv_path and route_keepout_radius_m > 0:
+                if _min_dist2_to_path(ugv_path, (loc.x, loc.y)) <= route_keepout_radius_m * route_keepout_radius_m:
                     continue
             return loc
         return None
 
-    # Find spawn points on the navigation mesh.
     targets: List["carla.Location"] = []
-    for _ in range(count * 4):  # over-sample, navigation may return None
-        loc = _sample_nav_location(keepout_radius_m)
-        if loc is not None:
-            targets.append(loc)
-        if len(targets) >= count:
-            break
+    if route_mode:
+        sidewalk_pts = _sidewalk_locations_along_route(
+            world, ugv_path,
+            spacing_m=route_spawn_spacing_m,
+            ugv_xy=ugv_xy,
+            ugv_keepout_m=spawn_keepout_radius_m,
+        )
+        rng.shuffle(sidewalk_pts)
+        LOGGER.info(
+            "Walker route corridor: %d sidewalk samples along UGV path.",
+            len(sidewalk_pts),
+        )
+        for x, y, z in sidewalk_pts[:count]:
+            targets.append(carla.Location(x=float(x), y=float(y), z=float(z)))
+    if len(targets) < count:
+        for _ in range(count * 6):
+            loc = _sample_nav_location(require_near_route=route_mode)
+            if loc is not None:
+                targets.append(loc)
+            if len(targets) >= count:
+                break
     if not targets:
-        LOGGER.warning("Navigation returned no walker spawn locations.")
+        LOGGER.warning("No walker spawn locations on/near the UGV route.")
         return
 
     walkers: List["carla.Actor"] = []
     for loc in targets[:count]:
         bp = rng.choice(walker_bps)
         if bp.has_attribute("is_invincible"):
-            bp.set_attribute("is_invincible", "false")
-        tf = carla.Transform(loc, carla.Rotation())
+            bp.set_attribute("is_invincible", "true")
+        surf_z = _ground_z_near(world, loc.x, loc.y, loc.z, lift=0.0)
+        tf = carla.Transform(
+            carla.Location(float(loc.x), float(loc.y), surf_z + 1.0),
+            carla.Rotation(),
+        )
         actor = world.try_spawn_actor(bp, tf)
         if actor is None:
             continue
@@ -611,8 +1174,14 @@ def _spawn_walkers(
         result.walker_controllers.append(ctrl)
         try:
             ctrl.start()
-            keepout_m = target_keepout_radius_m if target_keepout_radius_m is not None else keepout_radius_m
-            target = _sample_nav_location(keepout_m)
+            target = _sample_nav_location(require_near_route=route_mode and target_radius > 0)
+            if target is None and route_mode and ugv_path:
+                alt_pts = _sidewalk_locations_along_route(
+                    world, ugv_path, spacing_m=route_spawn_spacing_m * 1.5,
+                )
+                if alt_pts:
+                    x, y, z = rng.choice(alt_pts)
+                    target = carla.Location(x=float(x), y=float(y), z=float(z))
             if target is not None:
                 ctrl.go_to_location(target)
             ctrl.set_max_speed(1.4)  # ~normal walking
@@ -649,6 +1218,10 @@ def dress_scene(
     """
     rng = random.Random(seed)
     result = DressingResult()
+    vehicle_snap_margin_m = float(scene_cfg.get("static_vehicle_snap_margin_m", 0.02))
+    static_route_keepout_m = float(scene_cfg.get("static_route_keepout_radius_m", 0.0))
+    npc_vehicle_lift_m = float(scene_cfg.get("npc_vehicle_lift_m", 0.3))
+    npc_spawn_max_z_err_m = float(scene_cfg.get("npc_spawn_max_z_err_m", 1.2))
 
     per_relay = scene_cfg.get("per_relay", {}) or {}
     default_density = per_relay.get("default", {}) or {}
@@ -670,6 +1243,8 @@ def dress_scene(
             (float(relay_loc[0]), float(relay_loc[1]), float(relay_loc[2])),
             density, registry, rng, result, ugv_path=ugv_path,
             loop_center_xy=loop_center_xy,
+            vehicle_snap_margin_m=vehicle_snap_margin_m,
+            static_route_keepout_m=static_route_keepout_m,
         )
 
     _spawn_npc_vehicles(
@@ -680,20 +1255,47 @@ def dress_scene(
         ugv_xy=ugv_xy,
         keepout_radius_m=float(scene_cfg.get("npc_keepout_radius_m", 15.0)),
         ugv_path=ugv_path,
+        route_spawn_radius_m=float(scene_cfg.get("npc_route_spawn_radius_m", 0.0)),
+        route_spawn_spacing_m=float(scene_cfg.get("npc_route_spawn_spacing_m", 12.0)),
         route_keepout_radius_m=float(scene_cfg.get("npc_route_keepout_radius_m", 0.0)),
+        path_center_keepout_m=float(scene_cfg.get("npc_path_center_keepout_m", 0.0)),
+        vehicle_lift_m=npc_vehicle_lift_m,
+        max_catalog_z_delta_m=float(scene_cfg.get("npc_spawn_max_z_delta_m", 1.0)),
+        vehicle_snap_margin_m=vehicle_snap_margin_m,
+        max_spawn_z_err_m=npc_spawn_max_z_err_m,
+    )
+    _cull_ungrounded_npcs(
+        world, result, registry,
+        vehicle_lift_m=npc_vehicle_lift_m,
+        max_z_err_m=npc_spawn_max_z_err_m,
     )
     _spawn_walkers(
         world,
         int(scene_cfg.get("walkers", 0)),
         registry, rng, result,
         ugv_path=ugv_path,
-        keepout_radius_m=float(scene_cfg.get("walker_route_keepout_radius_m", 0.0)),
-        target_keepout_radius_m=float(
+        route_spawn_radius_m=float(scene_cfg.get("walker_route_spawn_radius_m", 0.0)),
+        route_spawn_spacing_m=float(scene_cfg.get("walker_route_spawn_spacing_m", 10.0)),
+        route_keepout_radius_m=float(scene_cfg.get("walker_route_keepout_radius_m", 0.0)),
+        target_route_spawn_radius_m=float(
             scene_cfg.get(
-                "walker_target_keepout_radius_m",
-                scene_cfg.get("walker_route_keepout_radius_m", 0.0),
+                "walker_target_route_spawn_radius_m",
+                scene_cfg.get("walker_route_spawn_radius_m", 0.0),
             )
         ),
+        ugv_xy=ugv_xy,
+        spawn_keepout_radius_m=float(scene_cfg.get("walker_spawn_keepout_radius_m", 0.0)),
+    )
+
+    static_vehicle_actors = list(result.static_vehicles)
+    for actor in result.static_props:
+        try:
+            if str(actor.type_id).startswith("vehicle."):
+                static_vehicle_actors.append(actor)
+        except Exception:
+            pass
+    _reconcile_static_vehicles(
+        world, static_vehicle_actors, margin_m=vehicle_snap_margin_m,
     )
 
     LOGGER.info(
@@ -703,6 +1305,22 @@ def dress_scene(
         len(result.npc_vehicles), len(result.walkers),
     )
     return result
+
+
+def finalize_dressing_after_warmup(
+    world: "carla.World",
+    scene_cfg: Dict[str, Any],
+    result: DressingResult,
+    registry: ActorRegistry,
+) -> int:
+    """Re-check moving NPC Z after warmup ticks; cull any floaters."""
+    vehicle_lift_m = float(scene_cfg.get("npc_vehicle_lift_m", 0.35))
+    max_z_err_m = float(scene_cfg.get("npc_spawn_max_z_err_m", 1.0))
+    return _cull_ungrounded_npcs(
+        world, result, registry,
+        vehicle_lift_m=vehicle_lift_m,
+        max_z_err_m=max_z_err_m,
+    )
 
 
 def stop_walker_controllers(result: DressingResult) -> None:
